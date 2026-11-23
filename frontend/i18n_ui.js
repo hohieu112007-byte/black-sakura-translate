@@ -223,6 +223,10 @@
       btn_later: "Để sau",
       btn_open_release: "🌐 Mở trang GitHub",
       btn_apply_update: "⚡ Cho phép & Cập nhật ngay",
+      modal_error_title: "⚠ CHI TIẾT LỖI XẢY RA",
+      lbl_error_detail: "Thông báo lỗi chi tiết",
+      btn_copy_error: "📋 Copy lỗi",
+      btn_close: "Đóng",
     },
     en: {
       drop_title: "DROP A GAME FOLDER OR SHORTCUT HERE",
@@ -446,6 +450,10 @@
       btn_later: "Later",
       btn_open_release: "🌐 Open GitHub",
       btn_apply_update: "⚡ Allow & Update Now",
+      modal_error_title: "⚠ ERROR DETAILS",
+      lbl_error_detail: "Detailed Error Message",
+      btn_copy_error: "📋 Copy Error",
+      btn_close: "Close",
     },
   };
 

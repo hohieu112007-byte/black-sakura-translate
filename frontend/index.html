@@ -408,7 +408,7 @@
 
               <div class="sakuga-progress-banner">
                 <div class="progress-live-strip" id="progressLiveStrip">
-                  <span class="pls-state">
+                  <span id="progLiveStateBtn" class="pls-state">
                     <span id="progLiveDot" class="dot dot-muted"></span>
                     <span id="progLiveTask" data-i18n="phase_ready">Sẵn sàng</span>
                   </span>
@@ -963,6 +963,28 @@
           <button id="btnDismissUpdateModal" type="button" class="btn btn-ghost btn-sm" data-i18n="btn_later">Để sau</button>
           <button id="btnOpenGitHubRelease" type="button" class="btn btn-outline btn-sm" data-i18n="btn_open_release">🌐 Mở trang GitHub</button>
           <sakuga-button id="btnApplyAppUpdate" data-i18n="btn_apply_update">⚡ Cho phép &amp; Cập nhật ngay</sakuga-button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Detailed Error Report -->
+  <div id="modalErrorReport" class="modal hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-head">
+        <h3 data-i18n="modal_error_title">⚠ CHI TIẾT LỖI XẢY RA</h3>
+        <button id="btnCloseErrorModal" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="errorReportContext" class="mono-mini"></div>
+        <div class="field-group">
+          <label data-i18n="lbl_error_detail">Thông báo lỗi chi tiết</label>
+          <pre id="errorReportMessageBox" class="error-report-box"></pre>
+        </div>
+        <div id="errorReportHintBox" class="slot-guide-box"></div>
+        <div class="modal-actions modal-actions-end" style="gap:8px;">
+          <button id="btnCopyErrorReport" type="button" class="btn btn-outline btn-sm" data-i18n="btn_copy_error">📋 Copy lỗi</button>
+          <sakuga-button id="btnDismissErrorModal" data-i18n="btn_close">Đóng</sakuga-button>
         </div>
       </div>
     </div>

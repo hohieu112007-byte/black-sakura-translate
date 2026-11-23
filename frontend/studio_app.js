@@ -40,6 +40,7 @@ const state = {
   appVersion: "1.0.0",
   autoCheckUpdates: true,
   appUpdateInfo: null,
+  lastJobError: null,
 };
 
 const DEFAULT_QWEN_SUPPORTED_LANGS = [
@@ -465,14 +466,90 @@ function updateLiveTelemetryUI(tele = null, opts = {}) {
     if ($("teleSpeed")) $("teleSpeed").textContent = `${tpsFmt} tok/s • ${tokFmt} tok • ${workers}x Pool`;
   }
   if (typeof opts.running === "boolean" && $("progLiveDot")) {
-    $("progLiveDot").className = `dot ${opts.running ? "dot-live" : opts.done ? "dot-green" : "dot-muted"}`;
+    $("progLiveDot").className = `dot ${
+      opts.running ? "dot-live" : opts.error ? "dot-error" : opts.done ? "dot-green" : "dot-muted"
+    }`;
+  } else if (opts.error && $("progLiveDot")) {
+    $("progLiveDot").className = "dot dot-error";
   } else if (opts.done && $("progLiveDot")) {
     $("progLiveDot").className = "dot dot-green";
+  }
+  const stateBtn = $("progLiveStateBtn");
+  if (stateBtn) {
+    if (opts.error) {
+      stateBtn.classList.add("has-error");
+      stateBtn.setAttribute("role", "button");
+      stateBtn.setAttribute("tabindex", "0");
+      stateBtn.title = state.uiLang === "en" ? "Click to inspect error details" : "Bấm vào đây để xem bảng chi tiết lỗi";
+    } else if (opts.running || opts.done || opts.clearError) {
+      stateBtn.classList.remove("has-error");
+      stateBtn.removeAttribute("role");
+      stateBtn.removeAttribute("tabindex");
+      stateBtn.removeAttribute("title");
+    }
   }
   if (typeof opts.taskLabel === "string" && $("progLiveTask")) {
     $("progLiveTask").textContent = opts.taskLabel;
   }
   syncDualModelUI(tele, opts);
+}
+
+function getErrorHintText(rawMsg) {
+  const isEn = state.uiLang === "en";
+  const m = String(rawMsg || "").toLowerCase();
+  if (m.includes("400") || m.includes("bad request")) {
+    return isEn
+      ? "💡 Tip: Ollama rejected a request parameter or context chunk. Try updating the app or switching AI Engine to 'Auto-Hybrid'."
+      : "💡 Gợi ý: Ollama từ chối tham số hoặc gói text dài. Hãy thử cập nhật bản mới hoặc chuyển Động cơ AI sang 'Auto-Hybrid'.";
+  }
+  if (m.includes("timeout") || m.includes("timed out") || m.includes("11434") || m.includes("connect")) {
+    return isEn
+      ? "💡 Tip: Make sure Ollama is running smoothly and not starved of GPU VRAM by other heavy apps/games."
+      : "💡 Gợi ý: Kiểm tra lại Ollama đang chạy ổn định và đóng bớt game/ứng dụng nặng VRAM khi dịch.";
+  }
+  if (m.includes("anticheat")) {
+    return isEn
+      ? "💡 Tip: Protected by Anti-Cheat Guard to keep your online account safe."
+      : "💡 Gợi ý: Game có Anti-Cheat bảo vệ tài khoản Online nên bị chặn mặc định.";
+  }
+  return isEn
+    ? "💡 Tip: Click 'Copy Error' below if you want to report this issue on GitHub."
+    : "💡 Gợi ý: Bấm 'Copy lỗi' bên dưới để kiểm tra hoặc gửi báo lỗi lên GitHub.";
+}
+
+function recordJobError(message, phaseHint = "") {
+  const g = selectedGame();
+  const mdl = state.ollamaStatus?.main_model || state.hardware?.main_model || "Ollama";
+  state.lastJobError = {
+    message: String(message || "Unknown error").trim(),
+    phase: phaseHint || $("phaseStatusLabel")?.textContent || "",
+    gameTitle: g?.title || "",
+    model: mdl,
+    time: new Date().toLocaleTimeString(),
+  };
+  const errLabel = state.uiLang === "en" ? "Error" : "Gặp lỗi";
+  updateLiveTelemetryUI(null, { running: false, error: true, taskLabel: errLabel });
+}
+
+function openErrorReportModal() {
+  if (!state.lastJobError) return;
+  const e = state.lastJobError;
+  const isEn = state.uiLang === "en";
+  if ($("errorReportContext")) {
+    const parts = [];
+    if (e.gameTitle) parts.push(`${isEn ? "Game" : "Game"}: ${e.gameTitle}`);
+    if (e.model) parts.push(`Model: ${e.model}`);
+    if (e.phase) parts.push(`${isEn ? "Stage" : "Giai đoạn"}: ${e.phase}`);
+    if (e.time) parts.push(`${isEn ? "Time" : "Lúc"}: ${e.time}`);
+    $("errorReportContext").textContent = parts.join(" • ");
+  }
+  if ($("errorReportMessageBox")) {
+    $("errorReportMessageBox").textContent = e.message;
+  }
+  if ($("errorReportHintBox")) {
+    $("errorReportHintBox").textContent = getErrorHintText(e.message);
+  }
+  $("modalErrorReport")?.classList.remove("hidden");
 }
 
 async function refreshHealth() {
@@ -1735,6 +1812,7 @@ async function runTranslationWithPreset(presetKey = null) {
   }
 
   try {
+    state.lastJobError = null;
     state.jobRunning = true;
     state.jobPaused = false;
     state.sessionTokens = 0;
@@ -1770,6 +1848,7 @@ async function runTranslationWithPreset(presetKey = null) {
   } catch (err) {
     state.jobRunning = false;
     stopLocalEtaCountdown();
+    recordJobError(err.message, state.uiLang === "en" ? "Start Translation" : "Khởi chạy dịch");
     updateStartButtonState();
     showToast(err.message, "error");
   }
@@ -1858,6 +1937,7 @@ async function repairGameErrors(gameId, fixFonts = true) {
     btn.disabled = true;
     btn.textContent = "⏳ Đang Fix lỗi...";
   }
+  state.lastJobError = null;
   state.jobRunning = true;
   state.jobPaused = false;
   state.sessionTokens = 0;
@@ -1900,7 +1980,7 @@ async function repairGameErrors(gameId, fixFonts = true) {
     showToast(res.ok ? "Đã kiểm tra & fix lỗi xong!" : "Fix hoàn tất có cảnh báo.");
   } catch (err) {
     stopLocalEtaCountdown();
-    updateLiveTelemetryUI(null, { running: false, taskLabel: "Fix lỗi gián đoạn" });
+    recordJobError(err.message, state.uiLang === "en" ? "Fix Errors" : "Fix lỗi");
     showToast(err.message, "error");
   } finally {
     state.jobRunning = false;
@@ -2138,6 +2218,7 @@ async function reapplyGameSkill(scope) {
   const g = selectedGame();
   if (!g) return;
   try {
+    state.lastJobError = null;
     state.jobRunning = true;
     state.jobPaused = false;
     updateStartButtonState();
@@ -2163,6 +2244,7 @@ async function reapplyGameSkill(scope) {
     }
   } catch (err) {
     state.jobRunning = false;
+    recordJobError(err.message, state.uiLang === "en" ? "Re-apply Skill" : "Áp dụng lại Skill");
     updateStartButtonState();
     showToast(err.message, "error");
   }
@@ -2569,7 +2651,7 @@ function setupSSE() {
       if (event === "error") {
         state.jobRunning = false;
         stopLocalEtaCountdown();
-        updateLiveTelemetryUI(null, { running: false, taskLabel: "Gặp lỗi" });
+        recordJobError(data.message || "Lỗi không xác định");
         updateStartButtonState();
         showToast(`Lỗi dịch: ${data.message}`, "error");
       }
@@ -2929,6 +3011,24 @@ function bindEvents() {
   });
   $("btnApplyAppUpdate")?.addEventListener("click", () => {
     applyAppUpdateNow();
+  });
+  $("btnCloseErrorModal")?.addEventListener("click", () => $("modalErrorReport")?.classList.add("hidden"));
+  $("btnDismissErrorModal")?.addEventListener("click", () => $("modalErrorReport")?.classList.add("hidden"));
+  $("btnCopyErrorReport")?.addEventListener("click", () => {
+    if (!state.lastJobError) return;
+    const e = state.lastJobError;
+    const dump = `[Black Sakura Translate Error]\nGame: ${e.gameTitle}\nModel: ${e.model}\nStage: ${e.phase}\nTime: ${e.time}\nMessage: ${e.message}`;
+    navigator.clipboard?.writeText(dump);
+    showToast(state.uiLang === "en" ? "Copied error details!" : "Đã copy chi tiết lỗi!");
+  });
+  $("progLiveStateBtn")?.addEventListener("click", () => {
+    if (state.lastJobError) openErrorReportModal();
+  });
+  $("progLiveStateBtn")?.addEventListener("keydown", (e) => {
+    if ((e.key === "Enter" || e.key === " ") && state.lastJobError) {
+      e.preventDefault();
+      openErrorReportModal();
+    }
   });
   $("chkAutoUpdateCheck")?.addEventListener("change", (e) => toggleAutoUpdateCheck(e.target.checked));
   $("tmSearchInput").addEventListener("input", () => loadToolsAndTM());
