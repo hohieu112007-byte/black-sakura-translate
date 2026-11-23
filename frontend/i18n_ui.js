@@ -219,9 +219,10 @@
       auto_update_desc: "Chỉ đọc phiên bản mới nhất trên GitHub Releases (12 giờ/lần), không gửi bất kỳ dữ liệu máy nào.",
       modal_update_title: "⬆ CÓ PHIÊN BẢN MỚI TRÊN GITHUB",
       lbl_update_notes: "Nội dung thay đổi (Release Notes)",
-      update_preserve_hint: "💡 Mẹo giữ dữ liệu: Khi tải file ZIP mới về giải nén, hãy giữ lại library.db, global_tm.db và thư mục backups/ để không mất thư viện game & bản dịch.",
+      update_preserve_hint: "💡 An toàn dữ liệu: Cập nhật tự động chỉ thay thế tệp ứng dụng, giữ nguyên 100% thư viện game, library.db, global_tm.db và thư mục backups/.",
       btn_later: "Để sau",
-      btn_open_release: "⬇ Mở trang tải GitHub",
+      btn_open_release: "🌐 Mở trang GitHub",
+      btn_apply_update: "⚡ Cho phép & Cập nhật ngay",
     },
     en: {
       drop_title: "DROP A GAME FOLDER OR SHORTCUT HERE",
@@ -441,9 +442,10 @@
       auto_update_desc: "Reads only the latest GitHub Release tag (cached 12h), sending zero device or user telemetry.",
       modal_update_title: "⬆ NEW GITHUB RELEASE AVAILABLE",
       lbl_update_notes: "Release Notes",
-      update_preserve_hint: "💡 Keep your data: When extracting a new ZIP release, preserve your existing library.db, global_tm.db, and backups/ folder to keep all saved translations.",
+      update_preserve_hint: "💡 Safe update: Automatic update replaces app binaries only and preserves 100% of your library.db, global_tm.db, settings, and backups/.",
       btn_later: "Later",
-      btn_open_release: "⬇ Open GitHub Releases",
+      btn_open_release: "🌐 Open GitHub",
+      btn_apply_update: "⚡ Allow & Update Now",
     },
   };
 

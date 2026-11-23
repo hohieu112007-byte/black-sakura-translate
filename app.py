@@ -338,6 +338,11 @@ class AutoUpdateSettingRequest(BaseModel):
     enabled: bool = True
 
 
+class ApplyAppUpdateRequest(BaseModel):
+    confirmed: bool = False
+    download_url: Optional[str] = None
+
+
 class MinimizeTrayRequest(BaseModel):
     enabled: bool = True
 
@@ -498,12 +503,141 @@ def _is_newer_version(remote_tag: str, current_ver: str) -> bool:
     return tuple(r_parts) > tuple(c_parts)
 
 
+_app_update_in_progress: bool = False
+
+
 def _sanitize_release_url(url: Optional[str]) -> str:
     candidate = str(url or "").strip()
     allowed_prefix = f"https://github.com/{_GITHUB_REPO}/releases"
     if candidate.startswith(allowed_prefix):
         return candidate
     return _GITHUB_RELEASES_PAGE
+
+
+def _sanitize_asset_download_url(url: Optional[str]) -> str:
+    candidate = str(url or "").strip()
+    allowed_prefix = f"https://github.com/{_GITHUB_REPO}/releases/download/"
+    if candidate.startswith(allowed_prefix) and candidate.lower().endswith(".zip"):
+        return candidate
+    return ""
+
+
+def _pick_windows_standalone_asset(assets: Any) -> Dict[str, Any]:
+    if not isinstance(assets, list):
+        return {"asset_name": "", "asset_size": 0, "download_url": ""}
+    chosen = None
+    for a in assets:
+        if not isinstance(a, dict):
+            continue
+        name = str(a.get("name") or "")
+        low = name.lower()
+        dl = _sanitize_asset_download_url(a.get("browser_download_url"))
+        if dl and "windows" in low and "standalone" in low and low.endswith(".zip"):
+            chosen = a
+            break
+    if chosen is None:
+        for a in assets:
+            if not isinstance(a, dict):
+                continue
+            name = str(a.get("name") or "").lower()
+            dl = _sanitize_asset_download_url(a.get("browser_download_url"))
+            if dl and "windows" in name and name.endswith(".zip"):
+                chosen = a
+                break
+    if not chosen:
+        return {"asset_name": "", "asset_size": 0, "download_url": ""}
+    return {
+        "asset_name": str(chosen.get("name") or ""),
+        "asset_size": int(chosen.get("size") or 0),
+        "download_url": _sanitize_asset_download_url(chosen.get("browser_download_url")),
+    }
+
+
+def _detect_update_mode(download_url: str) -> str:
+    if os.name == "nt" and getattr(sys, "frozen", False) and bool(_sanitize_asset_download_url(download_url)):
+        return "exe_zip"
+    if (APP_DIR / ".git").exists():
+        return "git_pull"
+    return "manual"
+
+
+def _safe_extract_update_zip(zip_path: Path, dest_dir: Path) -> Path:
+    """Safely extract verified release ZIP (blocking Zip-Slip & size bombs) and locate BlackSakuraTranslate.exe."""
+    max_total_bytes = 400 * 1024 * 1024
+    total_bytes = 0
+    dest_resolved = dest_dir.resolve()
+    dest_resolved.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            member = info.filename
+            if not member or member.endswith("/"):
+                continue
+            if member.startswith(("/", "\\")) or ":" in member.split("/")[0]:
+                raise ValueError(f"Unsafe archive path: {member}")
+            target = (dest_resolved / member).resolve()
+            if dest_resolved not in target.parents and target != dest_resolved:
+                raise ValueError(f"Zip-Slip path rejected: {member}")
+            total_bytes += max(0, int(info.file_size))
+            if total_bytes > max_total_bytes:
+                raise ValueError("Archive exceeds safe size limit")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as src_f, open(target, "wb") as out_f:
+                shutil.copyfileobj(src_f, out_f, 1024 * 256)
+            if os.name == "nt":
+                ads = f"{target}:Zone.Identifier"
+                try:
+                    if os.path.exists(ads):
+                        os.remove(ads)
+                except OSError:
+                    pass
+
+    if (dest_resolved / "BlackSakuraTranslate.exe").exists():
+        return dest_resolved
+    for exe_hit in dest_resolved.rglob("BlackSakuraTranslate.exe"):
+        return exe_hit.parent
+    raise ValueError("Gói tải về không chứa BlackSakuraTranslate.exe hợp lệ.")
+
+
+def _write_windows_update_script(new_app_root: Path, app_dir: Path, pid: int, staging_dir: Path) -> Path:
+    """Generate a self-cleaning CMD helper that swaps binaries after exit while preserving all user data."""
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    script_path = staging_dir / "apply_update.cmd"
+    src_s = str(new_app_root.resolve())
+    dst_s = str(app_dir.resolve())
+    stg_s = str(staging_dir.resolve())
+    lines = [
+        "@echo off",
+        "chcp 65001 >nul",
+        "setlocal",
+        f"set \"PID={int(pid)}\"",
+        f"set \"SRC={src_s}\"",
+        f"set \"DST={dst_s}\"",
+        f"set \"STG={stg_s}\"",
+        "set /a TRIES=0",
+        ":waitloop",
+        "tasklist /FI \"PID eq %PID%\" 2>nul | findstr /C:\"%PID%\" >nul",
+        "if not errorlevel 1 (",
+        "  set /a TRIES+=1",
+        "  if %TRIES% LSS 30 (",
+        "    timeout /t 1 /nobreak >nul",
+        "    goto waitloop",
+        "  )",
+        ")",
+        "timeout /t 1 /nobreak >nul",
+        "copy /Y \"%SRC%\\BlackSakuraTranslate.exe\" \"%DST%\\BlackSakuraTranslate.exe\" >nul",
+        "if exist \"%SRC%\\_internal\" (",
+        "  robocopy \"%SRC%\\_internal\" \"%DST%\\_internal\" /MIR /NFL /NDL /NJH /NJS /NC /NS /R:3 /W:1 >nul",
+        ")",
+        "for %%F in (HUONG_DAN_SU_DUNG.txt README.md LICENSE) do (",
+        "  if exist \"%SRC%\\%%F\" copy /Y \"%SRC%\\%%F\" \"%DST%\\%%F\" >nul",
+        ")",
+        "start \"\" /D \"%DST%\" \"%DST%\\BlackSakuraTranslate.exe\"",
+        "timeout /t 2 /nobreak >nul",
+        "rd /s /q \"%STG%\" 2>nul",
+        "endlocal",
+    ]
+    script_path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+    return script_path
 
 
 @app.get("/api/app/update-check")
@@ -523,16 +657,22 @@ async def api_app_update_check(force: bool = False):
     if not force:
         if cached_data and (now - int(cached_data.get("checked_at", 0))) < _UPDATE_CHECK_TTL_SEC:
             latest_tag = str(cached_data.get("latest_tag") or _APP_VERSION)
+            dl_url = _sanitize_asset_download_url(cached_data.get("download_url"))
+            upd_mode = _detect_update_mode(dl_url)
             return {
                 **cached_data,
                 "ok": True,
                 "current_version": _APP_VERSION,
                 "update_available": _is_newer_version(latest_tag, _APP_VERSION),
                 "release_url": _sanitize_release_url(cached_data.get("release_url")),
+                "download_url": dl_url,
+                "update_mode": upd_mode,
+                "can_auto_update": upd_mode in ("exe_zip", "git_pull"),
                 "auto_check_updates": auto_enabled,
                 "cached": True,
             }
         if not auto_enabled:
+            upd_mode = _detect_update_mode("")
             return {
                 "ok": True,
                 "skipped": True,
@@ -543,6 +683,11 @@ async def api_app_update_check(force: bool = False):
                 "release_name": "",
                 "release_notes": "",
                 "release_url": _GITHUB_RELEASES_PAGE,
+                "asset_name": "",
+                "asset_size": 0,
+                "download_url": "",
+                "update_mode": upd_mode,
+                "can_auto_update": upd_mode in ("exe_zip", "git_pull"),
                 "published_at": "",
                 "checked_at": int(cached_data.get("checked_at", 0)) if cached_data else 0,
                 "auto_check_updates": False,
@@ -564,6 +709,8 @@ async def api_app_update_check(force: bool = False):
         notes = str(payload.get("body") or "").strip()
         if len(notes) > 1200:
             notes = notes[:1200].rstrip() + "..."
+        asset_info = _pick_windows_standalone_asset(payload.get("assets"))
+        upd_mode = _detect_update_mode(asset_info["download_url"])
         result = {
             "ok": True,
             "current_version": _APP_VERSION,
@@ -573,6 +720,11 @@ async def api_app_update_check(force: bool = False):
             "release_name": str(payload.get("name") or latest_tag).strip(),
             "release_notes": notes,
             "release_url": _sanitize_release_url(payload.get("html_url")),
+            "asset_name": asset_info["asset_name"],
+            "asset_size": asset_info["asset_size"],
+            "download_url": asset_info["download_url"],
+            "update_mode": upd_mode,
+            "can_auto_update": upd_mode in ("exe_zip", "git_pull"),
             "published_at": str(payload.get("published_at") or "").strip(),
             "checked_at": now,
             "auto_check_updates": auto_enabled,
@@ -583,6 +735,7 @@ async def api_app_update_check(force: bool = False):
         return result
     except Exception as exc:
         logger.debug("App update check failed/offline: %s", exc)
+        upd_mode = _detect_update_mode("")
         return {
             "ok": False,
             "current_version": _APP_VERSION,
@@ -592,6 +745,11 @@ async def api_app_update_check(force: bool = False):
             "release_name": "",
             "release_notes": "",
             "release_url": _GITHUB_RELEASES_PAGE,
+            "asset_name": "",
+            "asset_size": 0,
+            "download_url": "",
+            "update_mode": upd_mode,
+            "can_auto_update": False,
             "published_at": "",
             "checked_at": now,
             "auto_check_updates": auto_enabled,
@@ -616,6 +774,184 @@ async def api_open_release_page(url: Optional[str] = None):
         return {"ok": True, "url": safe_url}
     except Exception as exc:
         return {"ok": False, "url": safe_url, "message": str(exc)}
+
+
+@app.post("/api/app/update-apply")
+async def api_apply_app_update(req: ApplyAppUpdateRequest):
+    global _app_update_in_progress
+    if not req.confirmed:
+        raise HTTPException(status_code=400, detail="Cần người dùng bấm xác nhận cho phép trước khi cập nhật.")
+    if _any_job_running():
+        raise HTTPException(
+            status_code=409,
+            detail="Đang có tiến trình Dịch hoặc Fix lỗi chạy ngầm. Hãy đợi xong hoặc tạm dừng trước khi cập nhật ứng dụng.",
+        )
+    if _app_update_in_progress:
+        return {"ok": True, "started": False, "message": "Đang tải bản cập nhật..."}
+
+    # Resolve validated download_url from request or cached release check
+    dl_url = _sanitize_asset_download_url(req.download_url)
+    if not dl_url:
+        try:
+            cached_info = json.loads(library_db.get_setting("app_update_cache", "") or "{}")
+            dl_url = _sanitize_asset_download_url(cached_info.get("download_url"))
+        except Exception:
+            dl_url = ""
+
+    mode = _detect_update_mode(dl_url)
+    if mode == "manual":
+        return {
+            "ok": False,
+            "mode": "manual",
+            "release_url": _GITHUB_RELEASES_PAGE,
+            "message": "Chế độ cài đặt hiện tại không hỗ trợ tự ghi đè; hãy tải trực tiếp từ GitHub Releases.",
+        }
+
+    if mode == "git_pull":
+        def _run_git_update() -> Dict[str, Any]:
+            st = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(APP_DIR),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if st.returncode != 0:
+                return {"ok": False, "mode": "git_pull", "message": "Không đọc được trạng thái Git."}
+            if (st.stdout or "").strip():
+                return {
+                    "ok": False,
+                    "mode": "git_pull",
+                    "message": "Thư mục mã nguồn đang có thay đổi chưa commit; vui lòng tải thủ công hoặc commit trước.",
+                }
+            pull = subprocess.run(
+                ["git", "pull", "--ff-only"],
+                cwd=str(APP_DIR),
+                capture_output=True,
+                text=True,
+                timeout=45,
+            )
+            if pull.returncode != 0:
+                return {
+                    "ok": False,
+                    "mode": "git_pull",
+                    "message": (pull.stderr or pull.stdout or "git pull thất bại").strip()[:220],
+                }
+            return {
+                "ok": True,
+                "mode": "git_pull",
+                "restart_required": True,
+                "message": "Đã cập nhật mã nguồn bằng git pull! Hãy khởi động lại app để áp dụng.",
+            }
+
+        res = await asyncio.to_thread(_run_git_update)
+        emit_sse(
+            "app_update_progress",
+            {
+                "stage": "done_restart_needed" if res.get("ok") else "error",
+                "pct": 100 if res.get("ok") else 0,
+                "message": res.get("message", ""),
+            },
+        )
+        return res
+
+    # Frozen Windows Standalone .EXE self-update
+    _app_update_in_progress = True
+
+    async def _perform_exe_update() -> None:
+        global _app_update_in_progress, _force_app_exit, _instance_mutex_handle
+        staging_dir = APP_DIR / ".update_staging"
+        zip_path = staging_dir / "release_update.zip"
+        extract_dir = staging_dir / "extracted"
+        try:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            emit_sse("app_update_progress", {"stage": "downloading", "pct": 1, "message": "Đang kết nối GitHub Releases..."})
+
+            allowed_hosts = ("github.com", "githubusercontent.com")
+            headers = {"User-Agent": f"BlackSakuraTranslate/{_APP_VERSION}"}
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, read=120.0), follow_redirects=True) as client:
+                async with client.stream("GET", dl_url, headers=headers) as resp:
+                    host = (resp.url.host or "").lower()
+                    if not any(host == h or host.endswith("." + h) for h in allowed_hosts):
+                        raise RuntimeError(f"Blocked untrusted redirect host: {host}")
+                    resp.raise_for_status()
+                    total = int(resp.headers.get("content-length") or 0)
+                    downloaded = 0
+                    last_emit = time.perf_counter()
+                    with open(zip_path, "wb") as out_f:
+                        async for chunk in resp.aiter_bytes(chunk_size=131072):
+                            if not chunk:
+                                continue
+                            out_f.write(chunk)
+                            downloaded += len(chunk)
+                            if downloaded > 350 * 1024 * 1024:
+                                raise RuntimeError("Gói cập nhật vượt quá dung lượng an toàn.")
+                            now_t = time.perf_counter()
+                            if now_t - last_emit >= 0.3:
+                                last_emit = now_t
+                                pct = min(90, int(round((downloaded / total) * 90))) if total > 0 else 45
+                                emit_sse(
+                                    "app_update_progress",
+                                    {
+                                        "stage": "downloading",
+                                        "pct": pct,
+                                        "downloaded_mb": round(downloaded / (1024 * 1024), 1),
+                                        "total_mb": round(total / (1024 * 1024), 1) if total > 0 else 0,
+                                    },
+                                )
+
+            emit_sse("app_update_progress", {"stage": "extracting", "pct": 94, "message": "Đang giải nén & kiểm tra tính toàn vẹn..."})
+            new_app_root = await asyncio.to_thread(_safe_extract_update_zip, zip_path, extract_dir)
+            script_path = await asyncio.to_thread(_write_windows_update_script, new_app_root, APP_DIR, os.getpid(), staging_dir)
+
+            emit_sse("app_update_progress", {"stage": "restarting", "pct": 100, "message": "Đang áp dụng bản mới & khởi động lại app..."})
+            await asyncio.sleep(0.5)
+
+            flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
+            subprocess.Popen(
+                ["cmd.exe", "/c", str(script_path)],
+                cwd=str(staging_dir),
+                creationflags=flags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            def _graceful_exit() -> None:
+                global _force_app_exit, _instance_mutex_handle
+                time.sleep(0.8)
+                _force_app_exit = True
+                if _tray_controller is not None:
+                    try:
+                        _tray_controller.stop()
+                    except Exception:
+                        pass
+                if _wv_window is not None:
+                    try:
+                        _wv_window.destroy()
+                    except Exception:
+                        pass
+                release_single_instance_lock(_instance_mutex_handle)
+                _instance_mutex_handle = None
+                os._exit(0)
+
+            threading.Thread(target=_graceful_exit, daemon=True).start()
+        except Exception as exc:
+            logger.exception("Auto-update failed")
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            emit_sse(
+                "app_update_progress",
+                {
+                    "stage": "error",
+                    "pct": 0,
+                    "message": str(exc).strip() or type(exc).__name__,
+                },
+            )
+        finally:
+            _app_update_in_progress = False
+
+    asyncio.create_task(_perform_exe_update())
+    return {"ok": True, "started": True, "mode": "exe_zip"}
 
 
 @app.post("/api/ui/hide-to-tray")

@@ -583,10 +583,78 @@ function openAppUpdateModal() {
     const pub = (info?.published_at || "").slice(0, 10);
     $("lblUpdateReleaseDate").textContent = pub ? (isEn ? `Published: ${pub}` : `Phát hành: ${pub}`) : "";
   }
+  if ($("lblUpdateAssetMeta")) {
+    const szMb = info?.asset_size ? `${(info.asset_size / (1024 * 1024)).toFixed(1)} MB` : "";
+    if (info?.update_mode === "exe_zip" && info?.asset_name) {
+      $("lblUpdateAssetMeta").textContent = isEn
+        ? `Package: ${info.asset_name}${szMb ? " (" + szMb + ")" : ""} • Auto-update ready`
+        : `Gói cài đặt: ${info.asset_name}${szMb ? " (" + szMb + ")" : ""} • Hỗ trợ tự cập nhật 1-Click`;
+    } else if (info?.update_mode === "git_pull") {
+      $("lblUpdateAssetMeta").textContent = isEn
+        ? "Source mode detected • Click Update Now to run git pull"
+        : "Đang chạy bản mã nguồn Git • Bấm Cập nhật ngay để chạy git pull";
+    } else {
+      $("lblUpdateAssetMeta").textContent = "";
+    }
+  }
   if ($("appUpdateNotesBox")) {
     $("appUpdateNotesBox").textContent = (info?.release_notes || "").trim() || (isEn ? "No release notes provided." : "Không có mô tả chi tiết cho phiên bản này.");
   }
+  if ($("appUpdateProgressWrap")) $("appUpdateProgressWrap").classList.add("hidden");
+  const applyBtn = $("btnApplyAppUpdate");
+  if (applyBtn) {
+    applyBtn.disabled = false;
+    applyBtn.classList.toggle("hidden", !(info?.can_auto_update || info?.update_mode === "exe_zip" || info?.update_mode === "git_pull"));
+  }
   $("modalAppUpdate")?.classList.remove("hidden");
+}
+
+async function applyAppUpdateNow() {
+  const info = state.appUpdateInfo || {};
+  const isEn = state.uiLang === "en";
+  const applyBtn = $("btnApplyAppUpdate");
+  if (state.jobRunning) {
+    showToast(
+      isEn
+        ? "A translation/repair job is running. Please pause or wait before updating."
+        : "Đang có tiến trình Dịch / Fix lỗi chạy ngầm. Hãy tạm dừng hoặc đợi xong trước khi cập nhật.",
+      "error"
+    );
+    return;
+  }
+  if (applyBtn) applyBtn.disabled = true;
+  if ($("appUpdateProgressWrap")) $("appUpdateProgressWrap").classList.remove("hidden");
+  if ($("appUpdateProgressBar")) $("appUpdateProgressBar").style.width = "4%";
+  if ($("appUpdateProgressText")) {
+    $("appUpdateProgressText").textContent = isEn ? "Starting update..." : "Đang bắt đầu tải bản cập nhật...";
+  }
+  try {
+    const res = await api("/api/app/update-apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmed: true, download_url: info.download_url || "" }),
+    });
+    if (res.mode === "manual") {
+      openAppReleasePage();
+      if (applyBtn) applyBtn.disabled = false;
+      return;
+    }
+    if (res.mode === "git_pull") {
+      if (res.ok) {
+        if ($("appUpdateProgressBar")) $("appUpdateProgressBar").style.width = "100%";
+        if ($("appUpdateProgressText")) $("appUpdateProgressText").textContent = res.message || (isEn ? "Updated! Please restart app." : "Đã cập nhật! Hãy mở lại app.");
+        showToast(res.message || "Đã cập nhật xong ✓");
+      } else {
+        if ($("appUpdateProgressText")) $("appUpdateProgressText").textContent = res.message || "Update error";
+        showToast(res.message || "Lỗi cập nhật", "error");
+        if (applyBtn) applyBtn.disabled = false;
+      }
+    }
+  } catch (err) {
+    if ($("appUpdateProgressText")) $("appUpdateProgressText").textContent = err.message;
+    showToast(err.message, "error");
+    if (applyBtn) applyBtn.disabled = false;
+  }
 }
 
 async function openAppReleasePage() {
@@ -2396,6 +2464,32 @@ function setupSSE() {
         return;
       }
       if (event === "tool_status") { refreshHealth(); if (state.view === "tools") loadToolsAndTM(); }
+      if (event === "app_update_progress") {
+        const wrap = $("appUpdateProgressWrap");
+        const bar = $("appUpdateProgressBar");
+        const txt = $("appUpdateProgressText");
+        const btn = $("btnApplyAppUpdate");
+        const pct = Math.max(0, Math.min(100, Number(data.pct || 0)));
+        const isEn = state.uiLang === "en";
+        if (wrap) wrap.classList.remove("hidden");
+        if (bar) bar.style.width = `${pct}%`;
+        if (data.stage === "downloading") {
+          const dlStr = data.total_mb ? `${data.downloaded_mb}/${data.total_mb} MB` : `${data.downloaded_mb || 0} MB`;
+          if (txt) txt.textContent = isEn ? `Downloading release (${pct}% • ${dlStr})...` : `Đang tải bản cập nhật (${pct}% • ${dlStr})...`;
+        } else if (data.stage === "extracting") {
+          if (txt) txt.textContent = data.message || (isEn ? "Extracting & verifying ZIP..." : "Đang giải nén & kiểm tra gói...");
+        } else if (data.stage === "restarting") {
+          if (txt) txt.textContent = data.message || (isEn ? "Applying update & restarting app..." : "Đang áp dụng bản mới & khởi động lại...");
+          showToast(isEn ? "Update downloaded! Restarting Black Sakura Translate..." : "Đã tải xong bản mới! App đang tự khởi động lại...");
+        } else if (data.stage === "done_restart_needed") {
+          if (txt) txt.textContent = data.message || (isEn ? "Updated! Restart app to apply." : "Đã cập nhật! Hãy khởi động lại app.");
+        } else if (data.stage === "error") {
+          if (txt) txt.textContent = `❌ ${data.message || "Update failed"}`;
+          showToast(data.message || "Lỗi cập nhật", "error");
+          if (btn) btn.disabled = false;
+        }
+        return;
+      }
       if (!g || (data.game_id && data.game_id !== g.game_id)) return;
 
       if (event === "live_rows" && data.rows) {
@@ -2832,7 +2926,9 @@ function bindEvents() {
   $("btnDismissUpdateModal")?.addEventListener("click", () => $("modalAppUpdate")?.classList.add("hidden"));
   $("btnOpenGitHubRelease")?.addEventListener("click", () => {
     openAppReleasePage();
-    $("btnOpenGitHubRelease")?.done?.();
+  });
+  $("btnApplyAppUpdate")?.addEventListener("click", () => {
+    applyAppUpdateNow();
   });
   $("chkAutoUpdateCheck")?.addEventListener("change", (e) => toggleAutoUpdateCheck(e.target.checked));
   $("tmSearchInput").addEventListener("input", () => loadToolsAndTM());

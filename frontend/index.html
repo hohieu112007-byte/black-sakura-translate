@@ -947,16 +947,22 @@
           <span class="badge badge-safe" id="lblUpdateLatestVer">v1.0.0</span>
           <span id="lblUpdateReleaseDate" class="mono-mini"></span>
         </div>
+        <div id="lblUpdateAssetMeta" class="mono-mini" style="opacity:0.85;"></div>
         <div class="field-group">
           <label data-i18n="lbl_update_notes">Nội dung thay đổi (Release Notes)</label>
           <pre id="appUpdateNotesBox" class="app-update-notes"></pre>
         </div>
-        <div class="slot-guide-box" data-i18n="update_preserve_hint">
-          💡 Mẹo giữ dữ liệu: Khi tải file ZIP mới về giải nén, hãy giữ lại hoặc chép đè cẩn thận để giữ nguyên thư mục backups/, cache/ và file library.db, global_tm.db của bạn.
+        <div id="appUpdateProgressWrap" class="pull-progress-wrap hidden">
+          <div class="pull-bar-bg"><div id="appUpdateProgressBar" class="pull-bar-fill" style="width:0%;"></div></div>
+          <span id="appUpdateProgressText" class="mono-mini">Đang chuẩn bị cập nhật...</span>
         </div>
-        <div class="modal-actions modal-actions-end">
+        <div class="slot-guide-box" data-i18n="update_preserve_hint">
+          💡 An toàn dữ liệu: Cập nhật tự động chỉ thay thế tệp ứng dụng, giữ nguyên 100% thư viện game, library.db, global_tm.db và thư mục backups/.
+        </div>
+        <div class="modal-actions modal-actions-end" style="gap:8px;flex-wrap:wrap;">
           <button id="btnDismissUpdateModal" type="button" class="btn btn-ghost btn-sm" data-i18n="btn_later">Để sau</button>
-          <sakuga-button id="btnOpenGitHubRelease" data-i18n="btn_open_release">⬇ Mở trang tải GitHub</sakuga-button>
+          <button id="btnOpenGitHubRelease" type="button" class="btn btn-outline btn-sm" data-i18n="btn_open_release">🌐 Mở trang GitHub</button>
+          <sakuga-button id="btnApplyAppUpdate" data-i18n="btn_apply_update">⚡ Cho phép &amp; Cập nhật ngay</sakuga-button>
         </div>
       </div>
     </div>

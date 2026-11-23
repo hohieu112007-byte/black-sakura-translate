@@ -517,15 +517,27 @@ class QwenEngine:
         num_ctx: Optional[int] = None,
         stream_cb: Optional[Callable[[int, float], None]] = None,
     ) -> Tuple[str, str, int, float]:
-        """Call Ollama /api/chat respecting supports_thinking, locked num_ctx, dynamic num_predict, and optional streaming."""
+        """Call Ollama /api/chat with surrogate sanitization, multi-stage HTTP 400 fallback, and optional streaming."""
         eff = self.profiler.get_effective_config() if hasattr(self.profiler, "get_effective_config") else self.profiler.get_effective_settings()
         model = model_name or eff["main_model"]
-        ctx = int(num_ctx or eff["num_ctx"] or 2048)
+        ctx = max(1024, int(num_ctx or eff["num_ctx"] or 2048))
         base_url = eff["ollama_base_url"]
         self._used_models.add(model)
 
-        est_in_tok = max(8, len(user_prompt) // 4)
-        dyn_predict = int(num_predict) if num_predict > 0 else min(1800, int(est_in_tok * 1.9) + 150)
+        # Strip lone UTF-16 surrogates / NUL bytes from game strings that cause Ollama JSON 400 errors
+        def _clean_text(s: str) -> str:
+            return (s or "").replace("\x00", "").encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
+
+        sys_clean = _clean_text(system_prompt)
+        usr_clean = _clean_text(user_prompt)
+
+        est_in_tok = max(8, len(usr_clean) // 4)
+        if num_predict > 0:
+            dyn_predict = int(num_predict)
+        elif think:
+            dyn_predict = min(2400, int(est_in_tok * 3.0) + 500)
+        else:
+            dyn_predict = min(1800, int(est_in_tok * 1.9) + 150)
 
         opts: Dict[str, Any] = {
             "temperature": temperature,
@@ -542,28 +554,60 @@ class QwenEngine:
             "keep_alive": "10m",
             "options": opts,
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt if (think or not can_think) else f"/no_think\n{user_prompt}"},
+                {"role": "system", "content": sys_clean},
+                {"role": "user", "content": usr_clean if (think or not can_think) else f"/no_think\n{usr_clean}"},
             ],
         }
         if can_think:
             payload["think"] = bool(think)
 
-        def _fallback_payload(src: Dict[str, Any]) -> Dict[str, Any]:
+        def _fallback_no_think(src: Dict[str, Any]) -> Dict[str, Any]:
             fb = dict(src)
             fb.pop("think", None)
             fb["messages"] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "system", "content": sys_clean},
+                {"role": "user", "content": usr_clean},
             ]
             return fb
+
+        def _fallback_minimal(src: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "model": model,
+                "stream": bool(src.get("stream", False)),
+                "options": {
+                    "temperature": temperature,
+                    "num_ctx": min(ctx, 2048),
+                },
+                "messages": [
+                    {"role": "system", "content": sys_clean},
+                    {"role": "user", "content": usr_clean},
+                ],
+            }
+
+        def _extract_http_error(resp_obj: httpx.Response, raw_body: str = "") -> str:
+            detail = raw_body.strip()
+            if not detail:
+                try:
+                    detail = resp_obj.text.strip()
+                except Exception:
+                    detail = ""
+            try:
+                j = json.loads(detail) if detail else {}
+                if isinstance(j, dict) and j.get("error"):
+                    detail = str(j["error"])
+            except Exception:
+                pass
+            return f"Ollama HTTP {resp_obj.status_code}: {detail[:260]}" if detail else f"Ollama HTTP {resp_obj.status_code}"
 
         t0 = time.perf_counter()
         if not use_stream:
             resp = await client.post(f"{base_url}/api/chat", json=payload)
             if resp.status_code == 400 and "think" in payload:
-                resp = await client.post(f"{base_url}/api/chat", json=_fallback_payload(payload))
-            resp.raise_for_status()
+                resp = await client.post(f"{base_url}/api/chat", json=_fallback_no_think(payload))
+            if resp.status_code == 400:
+                resp = await client.post(f"{base_url}/api/chat", json=_fallback_minimal(payload))
+            if resp.status_code >= 400:
+                raise RuntimeError(_extract_http_error(resp))
             data = resp.json()
             elapsed = max(0.05, time.perf_counter() - t0)
             msg = data.get("message", {})
@@ -583,9 +627,12 @@ class QwenEngine:
             last_emit = time.perf_counter()
             eval_cnt = 0
             async with client.stream("POST", f"{base_url}/api/chat", json=req_payload) as sresp:
-                if sresp.status_code == 400 and "think" in req_payload:
-                    raise ValueError("FALLBACK_NO_THINK")
-                sresp.raise_for_status()
+                if sresp.status_code == 400:
+                    raw_err = (await sresp.aread()).decode("utf-8", errors="ignore")
+                    raise ValueError(f"HTTP_400::{raw_err}")
+                if sresp.status_code >= 400:
+                    raw_err = (await sresp.aread()).decode("utf-8", errors="ignore")
+                    raise RuntimeError(_extract_http_error(sresp, raw_err))
                 async for line in sresp.aiter_lines():
                     if not line:
                         continue
@@ -625,12 +672,20 @@ class QwenEngine:
             final_toks = eval_cnt or max(chunk_toks, len(full_c) // 4, 1)
             return full_c, full_t, final_toks, elapsed_s
 
-        try:
-            return await _consume_stream(payload)
-        except ValueError as exc:
-            if str(exc) == "FALLBACK_NO_THINK":
-                return await _consume_stream(_fallback_payload(payload))
-            raise
+        candidates = [payload]
+        if "think" in payload:
+            candidates.append(_fallback_no_think(payload))
+        candidates.append(_fallback_minimal(payload))
+        last_400 = ""
+        for cand in candidates:
+            try:
+                return await _consume_stream(cand)
+            except ValueError as exc:
+                if str(exc).startswith("HTTP_400::"):
+                    last_400 = str(exc)[10:]
+                    continue
+                raise
+        raise RuntimeError(f"Ollama HTTP 400: {last_400[:260]}" if last_400 else "Ollama HTTP 400 Bad Request")
 
     async def pre_think_glossary(
         self,
@@ -753,24 +808,55 @@ class QwenEngine:
         # Build ID|Text payload
         id_to_row = {str(idx): row for idx, row in enumerate(batch_rows)}
         user_prompt = "\n".join(f"{idx}|{row['masked_text']}" for idx, row in enumerate(batch_rows))
-        use_think = ai_mode == "DEEP_THINK"
+        # Short UI / menu labels never benefit from chain-of-thought reasoning even in DEEP_THINK mode
+        use_think = (ai_mode == "DEEP_THINK") and (not is_short_ui) and (mode != "UI_HUD")
 
         total_tokens = 0
         total_elapsed = 0.0
 
         async def _execute_batch() -> None:
             nonlocal total_tokens, total_elapsed
-            content, thinking, eval_cnt, elapsed = await self._call_ollama_chat(
-                client,
-                sys_prompt,
-                user_prompt,
-                think=use_think,
-                temperature=0.2 if use_think else 0.15,
-                model_name=model_name,
-                num_ctx=num_ctx,
-            )
-            total_tokens += eval_cnt
-            total_elapsed += elapsed
+            content = ""
+            thinking = ""
+            try:
+                content, thinking, eval_cnt, elapsed = await self._call_ollama_chat(
+                    client,
+                    sys_prompt,
+                    user_prompt,
+                    think=use_think,
+                    temperature=0.2 if use_think else 0.15,
+                    model_name=model_name,
+                    num_ctx=num_ctx,
+                )
+                total_tokens += eval_cnt
+                total_elapsed += elapsed
+            except asyncio.CancelledError:
+                raise
+            except Exception as first_exc:
+                if use_think:
+                    logger.warning("DEEP_THINK batch failed (%s); auto-retrying batch with think=False.", first_exc)
+                    try:
+                        content, thinking, eval_cnt, elapsed = await self._call_ollama_chat(
+                            client,
+                            sys_prompt,
+                            user_prompt,
+                            think=False,
+                            temperature=0.15,
+                            model_name=model_name,
+                            num_ctx=num_ctx,
+                        )
+                        total_tokens += eval_cnt
+                        total_elapsed += elapsed
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as second_exc:
+                        if len(batch_rows) == 1:
+                            raise
+                        logger.warning("Batch fallback also failed (%s); falling back to micro-chunk retries.", second_exc)
+                elif len(batch_rows) > 1:
+                    logger.warning("Batch call failed (%s); falling back to micro-chunk retries.", first_exc)
+                else:
+                    raise
 
             if thinking and emit_cb:
                 emit_cb("thinking_chunk", {"thinking": thinking})
@@ -839,18 +925,25 @@ class QwenEngine:
                     await pause_event.wait()
                     sub_ids = retry_ids[c_start : c_start + chunk_sz]
                     retry_prompt = "\n".join(f"{rid}|{id_to_row[rid]['masked_text']}" for rid in sub_ids)
-                    r_content, _r_think, r_tok, r_elap = await self._call_ollama_chat(
-                        client,
-                        sys_prompt
-                        + "\nCRITICAL: Output ONLY 100% clean target-language translations matching input IDs verbatim; translate EVERY common word (including capitalized leading item/role nouns, never copy French/German words or switch to English), preserve all __TAG_x__, __NUM_x__, and __NL__, no foreign characters, no glued words, no repetition!",
-                        retry_prompt,
-                        think=False,
-                        temperature=0.0,
-                        model_name=model_name,
-                        num_ctx=num_ctx,
-                    )
-                    total_tokens += r_tok
-                    total_elapsed += r_elap
+                    try:
+                        r_content, _r_think, r_tok, r_elap = await self._call_ollama_chat(
+                            client,
+                            sys_prompt
+                            + "\nCRITICAL: Output ONLY 100% clean target-language translations matching input IDs verbatim; translate EVERY common word (including capitalized leading item/role nouns, never copy French/German words or switch to English), preserve all __TAG_x__, __NUM_x__, and __NL__, no foreign characters, no glued words, no repetition!",
+                            retry_prompt,
+                            think=False,
+                            temperature=0.0,
+                            model_name=model_name,
+                            num_ctx=num_ctx,
+                        )
+                        total_tokens += r_tok
+                        total_elapsed += r_elap
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as retry_exc:
+                        logger.warning("Micro-chunk retry failed (%s); keeping safe fallback for %d lines.", retry_exc, len(sub_ids))
+                        still_bad.extend(sub_ids)
+                        continue
                     r_parsed = parse_id_pipe_lines(r_content)
                     if len(sub_ids) == 1 and sub_ids[0] not in r_parsed:
                         plain_lines = [
@@ -1161,8 +1254,11 @@ class QwenEngine:
             ]
 
             story_prompt_mode = "SUB_ONLY" if scope == "SUB_ONLY" else "STORY"
+            # In DEEP_THINK mode, keep story chunks compact so <think> + output fit comfortably inside num_ctx
+            eff_story_items = min(sub_batch_sz, 10) if ai_mode == "DEEP_THINK" else sub_batch_sz
+            eff_story_chars = min(max_batch_chars, 950) if ai_mode == "DEEP_THINK" else max_batch_chars
             story_batches: List[Tuple[str, bool, List[Dict[str, Any]]]] = []
-            for chunk in _chunk_by_budget(long_story_rows, sub_batch_sz, max_batch_chars):
+            for chunk in _chunk_by_budget(long_story_rows, eff_story_items, eff_story_chars):
                 pm = "SUB_ONLY" if scope == "SUB_ONLY" else (
                     "UI_HUD" if all(x.get("category") == "UI" for x in chunk) else story_prompt_mode
                 )
