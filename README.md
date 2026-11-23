@@ -44,6 +44,49 @@
 
 ---
 
+## App làm được gì trong tác vụ hàng ngày?
+
+- **Quản lý thư viện game gọn như Steam:** Kéo thả thư mục game, file `.exe`, shortcut `.url/.lnk` hoặc bấm **Quét Steam Library** để tự nạp danh sách game kèm ảnh bìa dọc 2:3 và nút **CHƠI NGAY**.
+- **Dịch mới & Chạy ngầm không lo gián đoạn:** Chọn 1 trong 3 mức độ (*Siêu Tốc* / *Cân Bằng* / *Cốt Truyện Sâu*), thu gọn xuống khay hệ thống để máy tự dịch; nếu tạm dừng hoặc tắt đột ngột, mọi câu đã dịch đã lưu trong SQLite để chạy tiếp ngay đoạn dở.
+- **Biên tập & Chuốt bản dịch trực tiếp (Live Editor):** Tìm kiếm toàn bộ câu trong DB, lọc nhanh câu chưa dịch hoặc câu có dấu hiệu lỗi, **Thay thế hàng loạt** (Bulk Replace) bảo vệ thẻ code, khóa thuật ngữ nhân vật vào Từ điển và **Ghi nóng (Hot Apply)** thẳng vào game.
+- **Bảo trì bản dịch khi game update & Chia sẻ:** Khi Steam cập nhật game có thêm câu mới, bấm **Delta Update** để giữ nguyên 100% câu cũ đã sửa và chỉ dịch phần mới; xuất/nhập gói `.sakugapack` gửi bạn bè hoặc **Khôi phục bản gốc** trong 1 giây.
+
+---
+
+## App dịch game như thế nào & kết quả ra sao?
+
+Ứng dụng xử lý theo quy trình 5 bước tự động ngay trên máy bạn:
+
+1. **Quét Anti-Cheat & Sao lưu gốc:** Tự chặn các game Online có hệ thống chống gian lận (*EasyAntiCheat, BattlEye, Vanguard...*) để bảo vệ tài khoản; sao lưu file ngôn ngữ gốc kèm mã kiểm tra **SHA-256**.
+2. **Nhận diện Engine & Bóc tách chuỗi (< 1 giây):**
+   - Hỗ trợ **Unity** (Mono/IL2CPP, StringTable & Addressables `catalog.bin/.json`), **Unreal Engine** (`.locres`, `.pak`), **Ren'Py** (`.rpy`, `.rpa`), **RPG Maker** (`data/` / `www/data/`) và các định dạng text phổ biến (`.json`, `.csv`, `.tsv`, `.po/.pot`, `.xml`, `.yaml/.yml`, `.ini`, `.txt`).
+   - Tự động phân loại từng dòng thành **UI / Menu ngắn**, **Cốt truyện / Hội thoại** và bỏ qua biến hệ thống, đường dẫn code.
+3. **Dịch theo ngữ cảnh (Pha 0 + Tag Firewall + Global TM):**
+   - Câu trùng khớp 100% được lấy ngay từ **Global TM (0ms)**; các mẫu lặp cấu trúc được gộp dịch một lần.
+   - **Pha 0** đọc thông tin game để tự tạo *Style Card* & *Từ điển Thuật ngữ* giúp đồng nhất đại từ xưng hô (Tôi/Ta, Anh/Em, Huynh/Đệ...).
+   - **Tag Firewall** khóa nguyên vẹn biến lập trình (`{0}`, `%s`, `<color=...>`, `[tag]`, `\n`) tránh văng game.
+4. **Chèn theo Slot phụ (Piggyback) & Vá Font:** Ưu tiên ghi đè vào một slot ngôn ngữ phụ ít dùng (như `fr`, `pt-BR`, `es`...) để bạn giữ nguyên Tiếng Anh gốc trong game, tự đổi nhãn hiển thị thành *Tiếng Việt* (Unity) và tự vá font Unicode nếu game thiếu dấu tiếng Việt.
+5. **Tự kiểm lỗi QA sau khi dịch:** Tự rà soát các dòng còn sót chữ gốc/CJK, lỗi mã hóa hoặc thiếu tag để bạn bấm **Fix Lỗi** sửa lại chỉ bằng một click.
+
+---
+
+## Khuyến cáo chọn Game & Model AI (Ollama) phù hợp
+
+Ứng dụng tự nhận diện GPU/RAM để đề xuất cấu hình luồng chạy an toàn, đồng thời bạn có thể chọn bất kỳ model Ollama nào tùy theo **độ nặng của game**:
+
+| Loại Game & Khối lượng chữ | Phần cứng gợi ý | Model Ollama khuyên dùng | Chế độ & Mẹo tối ưu |
+| :--- | :--- | :--- | :--- |
+| **Game nhẹ / Indie / Co-op / Nhiều nhãn UI** *(ít thoại dài, chủ yếu menu, vật phẩm, thông báo)* | CPU-Only hoặc GPU ≤ 4GB–6GB VRAM | **`qwen3:1.7b`**, **`qwen2.5:3b`** hoặc **`qwen3.5:4b`** | Chọn **Cấp 1 (Siêu Tốc)** hoặc **Cấp 2 (Cân Bằng)**; chạy cực nhanh chỉ vài chục giây. |
+| **Game tầm trung / Hành động - Phiêu lưu / Mô phỏng** *(vài nghìn câu thoại, quest vừa phải)* | GPU ~8GB VRAM *(RTX 3060/4060...)* | **`qwen3.5:4b`** (nhanh, chuẩn) hoặc **`qwen3:8b`** (văn phong mượt hơn) | Bật **Dual-Model** (`qwen3:1.7b` quét UI + `qwen3:8b` dịch thoại) để vừa nhanh vừa mượt. |
+| **Game nặng chữ / RPG / Visual Novel / CRPG cốt truyện dày** *(hàng chục nghìn câu, nhiều ẩn dụ, lore phức tạp)* | GPU ≥ 12GB–16GB+ VRAM *(RTX 3060 12GB, 4070 Ti, 4080, 4090...)* | Model cỡ lớn **12B – 14B+** như **`gemma4:12b`**, **`qwen3:14b`** / **`qwen2.5:14b`** (hoặc 27B+ nếu có ≥ 24GB VRAM) | Dùng **Cấp 3 (Cốt Truyện Sâu)** + **Dual-Model** (`qwen3:1.7b` lo UI ngắn, model **12B/14B+** gánh 100% thoại dài) để giữ mạch văn tự nhiên và xưng hô chuẩn. |
+
+> **⚠️ Những game KHÔNG khuyến cáo / không hỗ trợ dịch trực tiếp:**
+> - **Game Online / PvP có Anti-Cheat nghiêm ngặt** (*EasyAntiCheat, BattlEye, Vanguard, Ricochet...*): App chủ động khóa nút dịch để tránh rủi ro khóa tài khoản.
+> - **Game đóng gói mã hóa độc quyền** không lộ file ngôn ngữ, hoặc game vẽ chữ trực tiếp lên ảnh texture (không chứa chuỗi văn bản).
+> - **Mẹo cho Laptop mỏng nhẹ:** Nếu chạy model 8B–14B khiến máy nóng hoặc rè tai nghe USB, hãy bật **Quiet Mode** trong phần *Cấu hình Model AI* để hạ luồng và cho GPU nghỉ nhịp giữa các batch.
+
+---
+
 ## Yêu cầu hệ thống
 
 - **Hệ điều hành:** Windows 10 / 11 (64-bit).
