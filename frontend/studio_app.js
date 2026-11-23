@@ -2586,6 +2586,16 @@ function setupSSE() {
           renderGameContextCard(g);
         }
       }
+      if (event === "thinking_chunk" && data.thinking) {
+        const out = $("prethinkOutput");
+        const hint = $("prethinkSummaryHint");
+        if (out) out.textContent = String(data.thinking).trim();
+        if (hint) {
+          hint.textContent = data.live
+            ? (state.uiLang === "en" ? "• 🧠 Reasoning live..." : "• 🧠 Đang suy luận Deep-Think...")
+            : (state.uiLang === "en" ? "• 🧠 Deep-Think active ✓" : "• 🧠 Deep-Think hoạt động ✓");
+        }
+      }
       if (event === "progress") {
         const vp = data.weighted_pct ?? data.pct ?? 0;
         const tps = Number(data.tok_per_sec ?? 0);

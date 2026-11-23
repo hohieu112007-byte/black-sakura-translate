@@ -48,7 +48,7 @@ OLLAMA_URL = normalize_ollama_url(os.environ.get("OLLAMA_HOST"))
 BATCH_SIZE = 25
 MAX_CONCURRENT_STREAMS = 5
 
-THINKING_MODEL_PREFIXES = ("qwen3", "qwen3.5", "deepseek-r1", "qwq")
+THINKING_MODEL_PREFIXES = ("qwen3", "qwen3.5", "deepseek-r1", "qwq", "gpt-oss", "nemotron", "cogito")
 
 
 def supports_thinking(model_name: str) -> bool:
@@ -58,6 +58,27 @@ def supports_thinking(model_name: str) -> bool:
         return False
     base = low.split(":")[0].split("/")[-1]
     return any(base.startswith(p) or p in low for p in THINKING_MODEL_PREFIXES)
+
+
+def _batch_needs_deep_think(
+    batch_rows: List[Dict[str, Any]],
+    mode: str,
+    is_short_ui: bool,
+    model_name: str,
+) -> bool:
+    """Selectively activate model thinking ONLY on narrative/dialogue/choice batches where reasoning improves quality."""
+    if is_short_ui or mode == "UI_HUD":
+        return False
+    if not supports_thinking(model_name):
+        return False
+    for r in batch_rows:
+        cat = str(r.get("category") or "").upper()
+        txt = str(r.get("masked_text") or "").strip()
+        if cat in ("SUBTITLE", "CHOICE") and len(txt) >= 18:
+            return True
+        if len(txt) >= 32 or any(ch in txt for ch in (".", "?", "!", "…", "\"", "—", ",")):
+            return True
+    return False
 
 # 3 User-Facing Preset Levels -> automatically configure scope + AI engine settings
 PRESET_PROFILES: Dict[str, Dict[str, Any]] = {
@@ -92,14 +113,14 @@ PRESET_PROFILES: Dict[str, Dict[str, Any]] = {
     "DEEP_STORY": {
         "level": 3,
         "title": "CỐT TRUYỆN SÂU SẮC",
-        "subtitle": "Deep-Think văn học • Tập trung Sub & Hội thoại",
-        "description": "Bật chuỗi suy luận sâu (<think>) cho từng cụm thoại & lựa chọn, kết hợp Skill 2 lớp giúp câu văn giàu cảm xúc.",
+        "subtitle": "Deep-Think thông minh • Giữ mạch hội thoại & stream suy luận",
+        "description": "Tận dụng Thinking Mode cho các cụm thoại & lựa chọn theo đúng mạch cảnh (6–7 câu/gói), giữ nguyên tốc độ nhanh cho nhãn UI ngắn.",
         "ai_mode": "DEEP_THINK",
         "scope": "SUB_ONLY",
         "translate_choices": True,
         "keep_proper_nouns": True,
         "patch_fonts": True,
-        "chars_per_sec": 85.0,
+        "chars_per_sec": 125.0,
         "prethink_sec": 9.0,
         "warmup_sec": 2.5,
     },
@@ -516,6 +537,7 @@ class QwenEngine:
         model_name: Optional[str] = None,
         num_ctx: Optional[int] = None,
         stream_cb: Optional[Callable[[int, float], None]] = None,
+        thinking_cb: Optional[Callable[[str], None]] = None,
     ) -> Tuple[str, str, int, float]:
         """Call Ollama /api/chat with surrogate sanitization, multi-stage HTTP 400 fallback, and optional streaming."""
         eff = self.profiler.get_effective_config() if hasattr(self.profiler, "get_effective_config") else self.profiler.get_effective_settings()
@@ -547,7 +569,7 @@ class QwenEngine:
         }
 
         can_think = supports_thinking(model)
-        use_stream = stream_cb is not None
+        use_stream = (stream_cb is not None) or (thinking_cb is not None)
         payload: Dict[str, Any] = {
             "model": model,
             "stream": use_stream,
@@ -654,14 +676,20 @@ class QwenEngine:
                     if chunk.get("eval_count"):
                         eval_cnt = int(chunk["eval_count"])
                     now_t = time.perf_counter()
-                    if stream_cb and (now_t - last_emit >= 0.35 or chunk.get("done")):
+                    if (stream_cb or thinking_cb) and (now_t - last_emit >= 0.35 or chunk.get("done")):
                         last_emit = now_t
                         el = max(0.1, now_t - t0)
                         cur_toks = max(eval_cnt, chunk_toks)
-                        try:
-                            stream_cb(cur_toks, round(cur_toks / el, 1))
-                        except Exception:
-                            pass
+                        if stream_cb:
+                            try:
+                                stream_cb(cur_toks, round(cur_toks / el, 1))
+                            except Exception:
+                                pass
+                        if thinking_cb and parts_t:
+                            try:
+                                thinking_cb("".join(parts_t)[-1800:])
+                            except Exception:
+                                pass
             elapsed_s = max(0.05, time.perf_counter() - t0)
             full_c = "".join(parts_c)
             full_t = "".join(parts_t)
@@ -782,8 +810,12 @@ class QwenEngine:
         is_short_ui: bool = False,
         model_name: Optional[str] = None,
         num_ctx: Optional[int] = None,
+        batch_stream_cb: Optional[Callable[[int, float], None]] = None,
     ) -> Tuple[int, float]:
         await pause_event.wait()
+
+        eff_model = model_name or self.get_active_model()
+        use_think = (ai_mode == "DEEP_THINK") and _batch_needs_deep_think(batch_rows, mode, is_short_ui, eff_model)
 
         # Dynamic RAG Glossary (<500 tokens)
         rag_terms = cache_db.match_dynamic_glossary(
@@ -803,13 +835,12 @@ class QwenEngine:
             style_skill_id=style_skill_id or tone_preset or "natural_standard",
             lang_skill_override=lang_skill_override,
             is_short_ui=is_short_ui,
+            deep_think=use_think,
         )
 
         # Build ID|Text payload
         id_to_row = {str(idx): row for idx, row in enumerate(batch_rows)}
         user_prompt = "\n".join(f"{idx}|{row['masked_text']}" for idx, row in enumerate(batch_rows))
-        # Short UI / menu labels never benefit from chain-of-thought reasoning even in DEEP_THINK mode
-        use_think = (ai_mode == "DEEP_THINK") and (not is_short_ui) and (mode != "UI_HUD")
 
         total_tokens = 0
         total_elapsed = 0.0
@@ -818,16 +849,43 @@ class QwenEngine:
             nonlocal total_tokens, total_elapsed
             content = ""
             thinking = ""
+            batch_ctx = int(num_ctx or 2048)
+            if use_think:
+                probe_vram = float((self.profiler.probe_system() or {}).get("vram_total_gb") or 0.0)
+                if probe_vram >= 7.0:
+                    batch_ctx = max(batch_ctx, 3072)
+
+            def _live_think_cb(snippet: str) -> None:
+                if emit_cb and snippet:
+                    emit_cb("thinking_chunk", {"thinking": snippet, "live": True})
+
             try:
-                content, thinking, eval_cnt, elapsed = await self._call_ollama_chat(
-                    client,
-                    sys_prompt,
-                    user_prompt,
-                    think=use_think,
-                    temperature=0.2 if use_think else 0.15,
-                    model_name=model_name,
-                    num_ctx=num_ctx,
-                )
+                if use_think:
+                    content, thinking, eval_cnt, elapsed = await asyncio.wait_for(
+                        self._call_ollama_chat(
+                            client,
+                            sys_prompt,
+                            user_prompt,
+                            think=True,
+                            temperature=0.22,
+                            model_name=eff_model,
+                            num_ctx=batch_ctx,
+                            stream_cb=batch_stream_cb,
+                            thinking_cb=_live_think_cb if emit_cb else None,
+                        ),
+                        timeout=95.0,
+                    )
+                else:
+                    content, thinking, eval_cnt, elapsed = await self._call_ollama_chat(
+                        client,
+                        sys_prompt,
+                        user_prompt,
+                        think=False,
+                        temperature=0.15,
+                        model_name=eff_model,
+                        num_ctx=batch_ctx,
+                        stream_cb=batch_stream_cb,
+                    )
                 total_tokens += eval_cnt
                 total_elapsed += elapsed
             except asyncio.CancelledError:
@@ -842,7 +900,7 @@ class QwenEngine:
                             user_prompt,
                             think=False,
                             temperature=0.15,
-                            model_name=model_name,
+                            model_name=eff_model,
                             num_ctx=num_ctx,
                         )
                         total_tokens += eval_cnt
@@ -859,7 +917,7 @@ class QwenEngine:
                     raise
 
             if thinking and emit_cb:
-                emit_cb("thinking_chunk", {"thinking": thinking})
+                emit_cb("thinking_chunk", {"thinking": thinking, "live": False})
 
             parsed = parse_id_pipe_lines(content)
             if len(id_to_row) > 4 and not _is_batch_aligned(content, set(id_to_row.keys())):
@@ -1226,10 +1284,17 @@ class QwenEngine:
                 (r for r in remaining if _is_short_ui(r)),
                 key=lambda r: (r.get("category") != "UI", len(r.get("masked_text") or "")),
             )
-            long_story_rows = sorted(
-                (r for r in remaining if not _is_short_ui(r)),
-                key=lambda r: len(r.get("masked_text") or ""),
-            )
+            if ai_mode == "DEEP_THINK":
+                # Preserve natural scene & file dialogue order so <think> tracks speaker pronouns coherently
+                long_story_rows = sorted(
+                    (r for r in remaining if not _is_short_ui(r)),
+                    key=lambda r: (str(r.get("file_path") or ""), str(r.get("sample_key") or "")),
+                )
+            else:
+                long_story_rows = sorted(
+                    (r for r in remaining if not _is_short_ui(r)),
+                    key=lambda r: len(r.get("masked_text") or ""),
+                )
 
             def _chunk_by_budget(rows: List[Dict[str, Any]], max_items: int, max_chars: int) -> List[List[Dict[str, Any]]]:
                 chunks: List[List[Dict[str, Any]]] = []
@@ -1254,9 +1319,9 @@ class QwenEngine:
             ]
 
             story_prompt_mode = "SUB_ONLY" if scope == "SUB_ONLY" else "STORY"
-            # In DEEP_THINK mode, keep story chunks compact so <think> + output fit comfortably inside num_ctx
-            eff_story_items = min(sub_batch_sz, 10) if ai_mode == "DEEP_THINK" else sub_batch_sz
-            eff_story_chars = min(max_batch_chars, 950) if ai_mode == "DEEP_THINK" else max_batch_chars
+            # In DEEP_THINK mode, keep story chunks coherent & compact (<=7 lines / <=680 chars) for crisp reasoning
+            eff_story_items = min(sub_batch_sz, 7) if ai_mode == "DEEP_THINK" else sub_batch_sz
+            eff_story_chars = min(max_batch_chars, 680) if ai_mode == "DEEP_THINK" else max_batch_chars
             story_batches: List[Tuple[str, bool, List[Dict[str, Any]]]] = []
             for chunk in _chunk_by_budget(long_story_rows, eff_story_items, eff_story_chars):
                 pm = "SUB_ONLY" if scope == "SUB_ONLY" else (
@@ -1264,50 +1329,100 @@ class QwenEngine:
                 )
                 story_batches.append((pm, False, chunk))
 
+            vram_tot_gb = float((eff.get("hardware") or {}).get("vram_total_gb") or 8.0)
+            deep_workers = max(1, min(workers, 2 if vram_tot_gb < 11.0 else 3))
+
             total_batches = len(ui_batches) + len(story_batches)
             t_phase_start = time.perf_counter()
             cum_tokens = 0
+            in_flight_tokens: Dict[int, int] = {}
+            batch_seq_counter = 0
             completed_batches = 0
             completed_chars = 0
             ema_cps = baseline_cps
             last_eta_sec: Optional[int] = None
+            last_stream_emit = 0.0
 
             async def _run_batch_and_report(
                 prompt_mode: str,
                 short_flag: bool,
                 b_rows: List[Dict[str, Any]],
                 use_model: str,
+                pool_width: int = 0,
             ) -> None:
-                nonlocal cum_tokens, completed_batches, completed_chars, ema_cps, last_eta_sec
+                nonlocal cum_tokens, batch_seq_counter, completed_batches, completed_chars, ema_cps, last_eta_sec, last_stream_emit
                 await pause_event.wait()
+                batch_seq_counter += 1
+                my_bid = batch_seq_counter
+                eff_pool_w = pool_width or workers
                 b_chars = sum(max(8, len(r["masked_text"])) for r in b_rows)
-                toks, _elap = await self._translate_one_batch_with_retry(
-                    client=client,
-                    sem=None,
-                    batch_rows=b_rows,
-                    mode=prompt_mode,
-                    source_lang=source_lang,
-                    target_lang=target_lang,
-                    ai_mode=ai_mode,
-                    keep_proper_nouns=keep_proper_nouns,
-                    cache_db=cache_db,
-                    global_tm=global_tm,
-                    pause_event=pause_event,
-                    emit_cb=emit_cb,
-                    compiled_style_card=active_style_card,
-                    tone_preset=tone_preset,
-                    style_skill_id=effective_style,
-                    lang_skill_override=lang_skill_override,
-                    is_short_ui=short_flag,
-                    model_name=use_model,
-                    num_ctx=ctx_sz,
-                )
+                is_deep_batch = (ai_mode == "DEEP_THINK") and _batch_needs_deep_think(b_rows, prompt_mode, short_flag, use_model)
+
+                def _on_batch_stream(cur_toks: int, _tps: float) -> None:
+                    nonlocal last_stream_emit
+                    in_flight_tokens[my_bid] = cur_toks
+                    now_s = time.perf_counter()
+                    if not emit_cb or (now_s - last_stream_emit < 0.4):
+                        return
+                    last_stream_emit = now_s
+                    live_total_toks = cum_tokens + sum(in_flight_tokens.values())
+                    wall_s = max(0.25, (now_s - t_phase_start) - self._pause_accum.get(game_id, 0.0))
+                    live_tps = round(live_total_toks / wall_s, 1)
+                    prog_now = cache_db.get_progress(source_lang, target_lang)
+                    emit_cb(
+                        "progress",
+                        {
+                            **prog_now,
+                            "phase": "TRANSLATING",
+                            "phase_label": (
+                                f"🧠 Deep-Think {eff_pool_w}x ({use_model}) • Gói {completed_batches}/{total_batches} • Đang suy luận..."
+                                if is_deep_batch
+                                else f"Pool {eff_pool_w}x ({use_model}) • {completed_batches}/{total_batches} gói..."
+                            ),
+                            "active_model": use_model,
+                            "active_model_role": "MAIN_STORY",
+                            "dual_model_active": dual_enabled,
+                            "tm_hits": len(tm_updates),
+                            "tokens_done": live_total_toks,
+                            "tok_per_sec": live_tps,
+                            "chars_done": completed_chars + tm_chars,
+                            "chars_total": total_rem_chars + tm_chars,
+                            "telemetry": self.get_telemetry(),
+                        },
+                    )
+
+                try:
+                    toks, _elap = await self._translate_one_batch_with_retry(
+                        client=client,
+                        sem=None,
+                        batch_rows=b_rows,
+                        mode=prompt_mode,
+                        source_lang=source_lang,
+                        target_lang=target_lang,
+                        ai_mode=ai_mode,
+                        keep_proper_nouns=keep_proper_nouns,
+                        cache_db=cache_db,
+                        global_tm=global_tm,
+                        pause_event=pause_event,
+                        emit_cb=emit_cb,
+                        compiled_style_card=active_style_card,
+                        tone_preset=tone_preset,
+                        style_skill_id=effective_style,
+                        lang_skill_override=lang_skill_override,
+                        is_short_ui=short_flag,
+                        model_name=use_model,
+                        num_ctx=ctx_sz,
+                        batch_stream_cb=_on_batch_stream if is_deep_batch else None,
+                    )
+                finally:
+                    in_flight_tokens.pop(my_bid, None)
+
                 cum_tokens += toks
                 completed_batches += 1
                 completed_chars += b_chars
 
                 active_wall = max(0.25, (time.perf_counter() - t_phase_start) - self._pause_accum.get(game_id, 0.0))
-                tps = round(cum_tokens / active_wall, 1)
+                tps = round((cum_tokens + sum(in_flight_tokens.values())) / active_wall, 1)
 
                 cum_cps = completed_chars / active_wall
                 if completed_batches <= 4:
@@ -1319,7 +1434,7 @@ class QwenEngine:
 
                 rem_chars = max(0, total_rem_chars - completed_chars)
                 rem_batches = max(0, total_batches - completed_batches)
-                rem_waves = (rem_batches + workers - 1) // workers
+                rem_waves = (rem_batches + eff_pool_w - 1) // eff_pool_w
                 raw_eta = int(round((rem_chars / max(20.0, ema_cps)) + (rem_waves * 0.25))) if rem_batches > 0 else 0
                 if rem_batches == 0:
                     eta = 0
@@ -1339,18 +1454,19 @@ class QwenEngine:
                     role_tag = "UI_FAST" if (dual_enabled and short_flag and use_model == ui_fast_model and ui_fast_model != main_model) else "MAIN_STORY"
                     self._active_runtime_model = use_model
                     self._active_runtime_role = role_tag
+                    pool_tag = f"🧠 Deep-Think {eff_pool_w}x" if is_deep_batch else f"Pool {eff_pool_w}x"
                     emit_cb(
                         "progress",
                         {
                             **prog,
                             "weighted_pct": max(prog["pct"], min(99.5 if rem_batches > 0 else 100.0, weighted_pct)),
                             "phase": "TRANSLATING",
-                            "phase_label": f"Pool {workers}x ({use_model}) • {completed_batches}/{total_batches} gói • {rem_chars:,} ký tự còn lại",
+                            "phase_label": f"{pool_tag} ({use_model}) • {completed_batches}/{total_batches} gói • {rem_chars:,} ký tự còn lại",
                             "active_model": use_model,
                             "active_model_role": role_tag,
                             "dual_model_active": dual_enabled,
                             "tm_hits": len(tm_updates),
-                            "tokens_done": cum_tokens,
+                            "tokens_done": cum_tokens + sum(in_flight_tokens.values()),
                             "tok_per_sec": tps,
                             "eta_seconds": eta,
                             "chars_done": completed_chars + tm_chars,
@@ -1359,12 +1475,16 @@ class QwenEngine:
                         },
                     )
 
-            async def _drain_queue(items: List[Tuple[str, bool, List[Dict[str, Any]], str]]) -> None:
+            async def _drain_queue(
+                items: List[Tuple[str, bool, List[Dict[str, Any]], str]],
+                max_workers: Optional[int] = None,
+            ) -> None:
                 if not items:
                     return
                 q: asyncio.Queue[Tuple[str, bool, List[Dict[str, Any]], str]] = asyncio.Queue()
                 for it in items:
                     q.put_nowait(it)
+                n_workers = min(max_workers or workers, len(items))
 
                 async def _worker() -> None:
                     while True:
@@ -1373,13 +1493,12 @@ class QwenEngine:
                         except asyncio.QueueEmpty:
                             break
                         try:
-                            await _run_batch_and_report(pm, short_fl, b_rows, mdl)
+                            await _run_batch_and_report(pm, short_fl, b_rows, mdl, pool_width=n_workers)
                             if cooldown_s > 0:
                                 await asyncio.sleep(cooldown_s)
                         finally:
                             q.task_done()
 
-                n_workers = min(workers, len(items))
                 await asyncio.gather(*(_worker() for _ in range(n_workers)))
 
             try:
@@ -1387,7 +1506,7 @@ class QwenEngine:
                     # Dual-Model: run fast UI batches first, purge ui_fast_model from VRAM, then run Pre-Think + Story on main_model
                     self._active_runtime_model = ui_fast_model
                     self._active_runtime_role = "UI_FAST"
-                    await _drain_queue([(pm, sf, br, ui_fast_model) for pm, sf, br in ui_batches])
+                    await _drain_queue([(pm, sf, br, ui_fast_model) for pm, sf, br in ui_batches], max_workers=workers)
                     self._active_runtime_model = main_model
                     self._active_runtime_role = "VRAM_SWAP"
                     if emit_cb:
@@ -1413,14 +1532,21 @@ class QwenEngine:
                             await _run_prethink()
                         self._active_runtime_model = main_model
                         self._active_runtime_role = "MAIN_STORY"
-                        await _drain_queue([(pm, sf, br, main_model) for pm, sf, br in story_batches])
+                        story_w = deep_workers if ai_mode == "DEEP_THINK" else workers
+                        await _drain_queue([(pm, sf, br, main_model) for pm, sf, br in story_batches], max_workers=story_w)
                 else:
                     if need_prethink:
                         await _run_prethink()
                     self._active_runtime_model = main_model
                     self._active_runtime_role = "MAIN_STORY"
-                    merged_queue = [(pm, sf, br, main_model) for pm, sf, br in (ui_batches + story_batches)]
-                    await _drain_queue(merged_queue)
+                    if ai_mode == "DEEP_THINK" and story_batches:
+                        # Run fast UI batches at full concurrency first, then run coherent Deep-Think story batches with dedicated KV-safe concurrency
+                        if ui_batches:
+                            await _drain_queue([(pm, sf, br, main_model) for pm, sf, br in ui_batches], max_workers=workers)
+                        await _drain_queue([(pm, sf, br, main_model) for pm, sf, br in story_batches], max_workers=deep_workers)
+                    else:
+                        merged_queue = [(pm, sf, br, main_model) for pm, sf, br in (ui_batches + story_batches)]
+                        await _drain_queue(merged_queue, max_workers=workers)
             finally:
                 self._active_runtime_role = "IDLE"
 

@@ -271,6 +271,14 @@ def build_glossary_system_prompt(
     )
 
 
+DEEP_THINK_GUIDE = """
+
+DEEP-THINK REASONING PROTOCOL (keep internal <think> concise, under 120 words):
+- Read all lines in this batch as one coherent scene to lock speaker relationships and consistent pronouns.
+- Adapt idioms, humor, cultural nuance, and emotional subtext naturally instead of translating word-for-word.
+- Verify every __TAG_x__, __NUM_x__, and __NL__ before outputting ONLY clean `ID|TranslatedText` lines."""
+
+
 def build_translation_system_prompt(
     mode: str,  # "UI_HUD" | "STORY" | "SUB_ONLY"
     source_lang: str,
@@ -283,6 +291,7 @@ def build_translation_system_prompt(
     lang_skill_override: str = "auto",
     is_short_ui: bool = False,
     skill_manager: Optional[SkillManager] = None,
+    deep_think: bool = False,
 ) -> str:
     is_ui = mode == "UI_HUD" or is_short_ui
     effective_style = style_skill_id or tone_preset or "natural_standard"
@@ -335,7 +344,7 @@ def build_translation_system_prompt(
             glossary_block=glossary_block,
         )
     if mode == "SUB_ONLY":
-        return SUB_ONLY_PROMPT.format(
+        base = SUB_ONLY_PROMPT.format(
             skill_prefix=skill_prefix,
             style_card_prefix=style_card_prefix,
             source_lang_name=src_name,
@@ -344,7 +353,8 @@ def build_translation_system_prompt(
             proper_noun_rule=proper_noun_rule,
             glossary_block=glossary_block,
         )
-    return STORY_PROMPT.format(
+        return base + (DEEP_THINK_GUIDE if deep_think else "")
+    base = STORY_PROMPT.format(
         skill_prefix=skill_prefix,
         style_card_prefix=style_card_prefix,
         source_lang_name=src_name,
@@ -353,3 +363,4 @@ def build_translation_system_prompt(
         proper_noun_rule=proper_noun_rule,
         glossary_block=glossary_block,
     )
+    return base + (DEEP_THINK_GUIDE if deep_think else "")
