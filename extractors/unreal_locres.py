@@ -15,9 +15,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from extractors.subtitle_filter import LocEntry, classify_entry_category, is_translatable_string
 
+from core import get_app_dir
+
 logger = logging.getLogger("sakuga.unreal_locres")
 
-APP_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = get_app_dir(__file__)
 DEFAULT_REPAK = APP_DIR / "tools" / "repak" / "repak.exe"
 DEFAULT_UNREAL_LOCRES = APP_DIR / "tools" / "unreallocres" / "UnrealLocres.exe"
 

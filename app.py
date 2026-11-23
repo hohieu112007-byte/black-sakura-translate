@@ -28,9 +28,17 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-APP_DIR = Path(__file__).resolve().parent
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")) if (getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")) else APP_DIR
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
+if str(BUNDLE_DIR) not in sys.path:
+    sys.path.insert(0, str(BUNDLE_DIR))
 
 from core.atomic_io import atomic_write_text, cleanup_orphaned_temps
 from core.database import GameCacheDB, GlobalTMDB, LibraryDB
@@ -72,9 +80,19 @@ from safety_shield.tag_firewall import mask_tags, validate_and_unmask
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("sakuga.app")
 
-FRONTEND_DIR = APP_DIR / "frontend"
-for _runtime_dir in ("backups", "cache", "covers", "tools"):
+FRONTEND_DIR = BUNDLE_DIR / "frontend"
+for _runtime_dir in ("backups", "cache", "covers", "tools", "skills"):
     (APP_DIR / _runtime_dir).mkdir(parents=True, exist_ok=True)
+if BUNDLE_DIR != APP_DIR and (BUNDLE_DIR / "skills").exists():
+    for _layer in ("languages", "styles"):
+        _src_layer = BUNDLE_DIR / "skills" / _layer
+        _dst_layer = APP_DIR / "skills" / _layer
+        _dst_layer.mkdir(parents=True, exist_ok=True)
+        if _src_layer.exists():
+            for _md in _src_layer.glob("*.md"):
+                _target_md = _dst_layer / _md.name
+                if not _target_md.exists():
+                    shutil.copy2(_md, _target_md)
 
 hw_profiler = HardwareProfiler(APP_DIR / "settings.json")
 hw_profiler.apply_ollama_env()
@@ -357,7 +375,7 @@ async def index():
 
 @app.get("/favicon.ico")
 async def favicon():
-    ico = APP_DIR / "sakuga_icon.ico"
+    ico = BUNDLE_DIR / "sakuga_icon.ico"
     if ico.exists():
         return FileResponse(str(ico))
     raise HTTPException(status_code=404, detail="Icon not found")
@@ -2494,6 +2512,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Black Sakura Translate — Local AI Game Localization Launcher")
     parser.add_argument("--web", action="store_true", help="Chạy trên trình duyệt mặc định thay vì cửa sổ Desktop PyWebView")
+    parser.add_argument("--no-browser", action="store_true", help="Chạy ở chế độ headless server (không tự mở trình duyệt)")
     parser.add_argument("--port", type=int, default=8765, help="Cổng ưu tiên cho máy chủ cục bộ (mặc định: 8765)")
     args, _ = parser.parse_known_args()
 
@@ -2506,7 +2525,7 @@ def main() -> None:
     port = _find_free_port(max(1024, int(args.port)))
     url = f"http://127.0.0.1:{port}"
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", log_config=None)
     server = uvicorn.Server(config)
     t = threading.Thread(target=server.run, daemon=True)
     t.start()
@@ -2526,17 +2545,18 @@ def main() -> None:
         import webbrowser
 
         logger.info("Black Sakura Translate running in Web mode at %s (Press Ctrl+C to stop).", url)
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+        if not args.no_browser:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
         try:
             while t.is_alive():
                 time.sleep(0.5)
         except KeyboardInterrupt:
             pass
 
-    if args.web:
+    if args.web or args.no_browser:
         try:
             _run_browser_fallback()
         finally:
@@ -2593,7 +2613,7 @@ def main() -> None:
             except Exception:
                 pass
 
-    ico_path = APP_DIR / "sakuga_icon.ico"
+    ico_path = BUNDLE_DIR / "sakuga_icon.ico"
     _tray_controller = WinSystemTray(
         icon_path=ico_path,
         tooltip="Black Sakura Translate",

@@ -9,9 +9,10 @@ import struct
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from core import get_app_dir
 from core.atomic_io import atomic_write_bytes
 
-APP_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = get_app_dir(__file__)
 TOOLS_FONTS_DIR = APP_DIR / "tools" / "fonts"
 
 _UNITY_PATCH_LATIN_RE = re.compile(

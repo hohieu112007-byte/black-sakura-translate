@@ -9,6 +9,8 @@ env/
 *.egg-info/
 dist/
 build/
+*.spec
+Black-Sakura-Translate-*.zip
 
 # User runtime databases, covers, caches & local settings
 library.db

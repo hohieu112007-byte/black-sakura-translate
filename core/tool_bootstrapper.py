@@ -12,9 +12,11 @@ from typing import Any, Callable, Dict, Optional
 
 import httpx
 
+from core import get_app_dir
+
 logger = logging.getLogger("sakuga.bootstrapper")
 
-APP_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = get_app_dir(__file__)
 DEFAULT_TOOLS_DIR = APP_DIR / "tools"
 
 TOOL_SPECS = {

@@ -1,6 +1,11 @@
 # Black Sakura Translate
 
+[![Tải App Windows (Latest Release)](https://img.shields.io/badge/TẢI_APP_NGAY-Release_v1.0.0_(Windows)-ff5fa8?style=for-the-badge&logo=github)](https://github.com/hohieu112007-byte/black-sakura-translate/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
+
 **Black Sakura Translate** là ứng dụng Việt hóa / đa ngôn ngữ hóa game PC **hoàn toàn miễn phí, chạy 100% AI cục bộ (Local AI qua Ollama)** với giao diện phong cách **Steam Desktop** hiện đại. Không cần API trả phí, không gửi dữ liệu ra máy chủ ngoài, bảo vệ file game gốc bằng hệ thống an toàn 6 lớp.
+
+> **👉 Tải nhanh cho người dùng (không cần biết code):** Bấm nút **[TẢI APP NGAY (Release v1.0.0)](https://github.com/hohieu112007-byte/black-sakura-translate/releases/latest)** hoặc nhìn cột **Releases** bên phải trang GitHub -> tải file `.zip`, giải nén và chạy luôn!
 
 ---
 
@@ -38,13 +43,16 @@
 
 ## Cài đặt & Khởi chạy nhanh
 
-### Cách 1: Chạy 1-Click trên Windows (Khuyên dùng)
-1. Cài **Python 3.10+** và **Ollama** (tải tại [ollama.com](https://ollama.com/download)).
-2. Tải mã nguồn về máy (`git clone` hoặc tải file ZIP rồi giải nén).
-3. Nháy đúp **`Start_Black_Sakura_Translate.bat`** — script tự cài thư viện Python nếu thiếu và mở ứng dụng.
-4. **Kết nối Model AI không cần dòng lệnh:** Lần đầu mở app, nếu Ollama chưa chạy hoặc chưa tải model, thanh thiết lập nhanh sẽ tự hiện ngay trên đầu màn hình với các nút **▶ Mở Ollama ngay** và **⬇ Tải ngay `qwen3.5:4b` & Tự kết nối** (tải xong tự gắn làm model chính sẵn sàng dịch ngay).
+### Cách 1: Tải bản Độc lập `.EXE` (Không cần cài Python — Khuyên dùng!)
+1. Mở trang **[Releases mới nhất](https://github.com/hohieu112007-byte/black-sakura-translate/releases/latest)** và tải file **`Black-Sakura-Translate-v1.0.0-Windows-Standalone.zip`**.
+2. Giải nén ra bất kỳ thư mục nào và nháy đúp **`BlackSakuraTranslate.exe`**.
+3. Cài **[Ollama](https://ollama.com/download)** (nếu máy chưa có) — ngay khi mở app, thanh thiết lập 1-Click sẽ tự hiện để bạn bấm **▶ Mở Ollama ngay** và **⬇ Tải ngay `qwen3.5:4b` & Tự kết nối**.
 
-### Cách 2: Chạy bằng dòng lệnh (CLI)
+### Cách 2: Chạy bản Portable / Mã nguồn (Nếu máy có Python 3.10+)
+1. Tải **`Black-Sakura-Translate-v1.0.0-Source.zip`** tại mục Releases (hoặc `git clone` bên dưới) rồi giải nén.
+2. Nháy đúp **`Start_Black_Sakura_Translate.bat`** — script tự cài các thư viện trong `requirements.txt` nếu thiếu và mở ứng dụng.
+
+### Cách 3: Chạy bằng dòng lệnh (CLI cho Developer)
 ```bash
 git clone https://github.com/hohieu112007-byte/black-sakura-translate.git
 cd black-sakura-translate

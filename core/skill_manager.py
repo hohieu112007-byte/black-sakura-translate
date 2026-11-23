@@ -12,9 +12,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ruamel.yaml import YAML
 
+from core import get_app_dir
 from core.atomic_io import atomic_write_text
 
-APP_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = get_app_dir(__file__)
 SKILLS_DIR = APP_DIR / "skills"
 LANG_SKILLS_DIR = SKILLS_DIR / "languages"
 STYLE_SKILLS_DIR = SKILLS_DIR / "styles"

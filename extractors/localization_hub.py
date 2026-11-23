@@ -37,9 +37,11 @@ from extractors.unreal_locres import (
 )
 from safety_shield.encoding_guard import detect_encoding_and_eol, write_preserving_encoding
 
+from core import get_app_dir
+
 logger = logging.getLogger("sakuga.hub")
 
-APP_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = get_app_dir(__file__)
 RPATOOL_PATH = APP_DIR / "tools" / "rpatool.py"
 
 EXTERNAL_LOC_DIRS = {

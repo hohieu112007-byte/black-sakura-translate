@@ -24,9 +24,11 @@ try:
 except Exception:
     winreg = None
 
+from core import get_app_dir
+
 logger = logging.getLogger("sakuga.launcher")
 
-APP_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = get_app_dir(__file__)
 COVERS_DIR = APP_DIR / "covers"
 COVERS_DIR.mkdir(parents=True, exist_ok=True)
 

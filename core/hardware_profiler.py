@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 
+from core import get_app_dir
 from core.atomic_io import atomic_write_text
 
 with warnings.catch_warnings():
@@ -21,7 +22,7 @@ with warnings.catch_warnings():
     except Exception:
         _HAS_NVML = False
 
-APP_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = get_app_dir(__file__)
 DEFAULT_SETTINGS_PATH = APP_DIR / "settings.json"
 
 _INITIAL_SYSTEM_OLLAMA_PARALLEL = os.environ.get("OLLAMA_NUM_PARALLEL")

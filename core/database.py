@@ -12,9 +12,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from rapidfuzz import fuzz
 
+from core import get_app_dir
 from safety_shield.tag_firewall import fold_source_numbers, mask_tags, unfold_numbers
 
-APP_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = get_app_dir(__file__)
 
 
 def sha1_text(text: str) -> str:
