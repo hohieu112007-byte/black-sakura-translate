@@ -46,8 +46,8 @@
 
 ### Cách 2: Chạy bằng dòng lệnh (CLI)
 ```bash
-git clone <url-repo-cua-ban>
-cd sakuga_localization_launcher
+git clone https://github.com/hohieu112007-byte/black-sakura-translate.git
+cd black-sakura-translate
 pip install -r requirements.txt
 python app.py
 ```
