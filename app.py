@@ -2716,6 +2716,25 @@ def release_single_instance_lock(
             pass
 
 
+def _unblock_bundled_dotnet_assemblies() -> None:
+    """Clear Mark-of-the-Web (Zone.Identifier) ADS on bundled .NET/WebView2 DLLs from downloaded ZIPs."""
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return
+    for sub in ("pythonnet", "clr_loader", "webview"):
+        root = BUNDLE_DIR / sub
+        if not root.exists():
+            continue
+        for fp in root.rglob("*"):
+            if not fp.is_file():
+                continue
+            ads = f"{fp}:Zone.Identifier"
+            try:
+                if os.path.exists(ads):
+                    os.remove(ads)
+            except OSError:
+                pass
+
+
 def main() -> None:
     global _wv_window, _tray_controller, _force_app_exit, _instance_mutex_handle
     import argparse
@@ -2761,7 +2780,7 @@ def main() -> None:
             except Exception:
                 pass
         try:
-            while t.is_alive():
+            while t.is_alive() and not server.should_exit:
                 time.sleep(0.5)
         except KeyboardInterrupt:
             pass
@@ -2775,6 +2794,8 @@ def main() -> None:
             _instance_mutex_handle = None
         return
 
+    _unblock_bundled_dotnet_assemblies()
+
     try:
         import webview
         from webview.dom import DOMEventHandler
@@ -2787,15 +2808,6 @@ def main() -> None:
             release_single_instance_lock(_instance_mutex_handle)
             _instance_mutex_handle = None
         return
-
-    _wv_window = webview.create_window(
-        _APP_TITLE,
-        url=url,
-        width=1400,
-        height=880,
-        min_size=(1120, 720),
-        background_color="#0B0B0E",
-    )
 
     def _request_full_exit() -> None:
         global _force_app_exit
@@ -2815,6 +2827,7 @@ def main() -> None:
             except Exception:
                 pass
         _force_app_exit = True
+        server.should_exit = True
         if _tray_controller is not None:
             _tray_controller.stop()
         if _wv_window is not None:
@@ -2823,47 +2836,70 @@ def main() -> None:
             except Exception:
                 pass
 
+    def _open_from_tray() -> None:
+        if _wv_window is not None:
+            _restore_window_from_tray()
+        else:
+            import webbrowser
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+
     ico_path = BUNDLE_DIR / "sakuga_icon.ico"
     _tray_controller = WinSystemTray(
         icon_path=ico_path,
         tooltip="Black Sakura Translate",
-        on_open=_restore_window_from_tray,
+        on_open=_open_from_tray,
         on_hide=lambda: _hide_window_to_tray(True),
         on_exit=_request_full_exit,
         is_busy_fn=_any_job_running,
     )
     _tray_controller.start()
 
-    def _on_closing():
-        if _force_app_exit:
-            return True
-        min_pref = library_db.get_setting("minimize_to_tray", "1") == "1"
-        if _any_job_running() or min_pref:
-            threading.Thread(target=lambda: _hide_window_to_tray(True), daemon=True).start()
-            return False
-        return True
-
-    def _on_minimized():
-        if library_db.get_setting("minimize_to_tray", "1") == "1":
-            threading.Thread(target=lambda: _hide_window_to_tray(True), daemon=True).start()
-
-    def _on_loaded():
-        def _on_drop(e):
-            files = e.get("dataTransfer", {}).get("files", [])
-            paths = [f.get("pywebviewFullPath") for f in files if f.get("pywebviewFullPath")]
-            if paths and _wv_window:
-                _wv_window.evaluate_js(f"window.onSakugaNativeDrop && window.onSakugaNativeDrop({json.dumps(paths)})")
-
-        try:
-            _wv_window.dom.document.events.drop += DOMEventHandler(_on_drop, prevent_default=True, stop_propagation=True)
-        except Exception as exc:
-            logger.debug("DOM drop hook warning: %s", exc)
-
-    _wv_window.events.closing += _on_closing
-    _wv_window.events.minimized += _on_minimized
-    _wv_window.events.loaded += _on_loaded
     try:
+        _wv_window = webview.create_window(
+            _APP_TITLE,
+            url=url,
+            width=1400,
+            height=880,
+            min_size=(1120, 720),
+            background_color="#0B0B0E",
+        )
+
+        def _on_closing():
+            if _force_app_exit:
+                return True
+            min_pref = library_db.get_setting("minimize_to_tray", "1") == "1"
+            if _any_job_running() or min_pref:
+                threading.Thread(target=lambda: _hide_window_to_tray(True), daemon=True).start()
+                return False
+            return True
+
+        def _on_minimized():
+            if library_db.get_setting("minimize_to_tray", "1") == "1":
+                threading.Thread(target=lambda: _hide_window_to_tray(True), daemon=True).start()
+
+        def _on_loaded():
+            def _on_drop(e):
+                files = e.get("dataTransfer", {}).get("files", [])
+                paths = [f.get("pywebviewFullPath") for f in files if f.get("pywebviewFullPath")]
+                if paths and _wv_window:
+                    _wv_window.evaluate_js(f"window.onSakugaNativeDrop && window.onSakugaNativeDrop({json.dumps(paths)})")
+
+            try:
+                _wv_window.dom.document.events.drop += DOMEventHandler(_on_drop, prevent_default=True, stop_propagation=True)
+            except Exception as exc:
+                logger.debug("DOM drop hook warning: %s", exc)
+
+        _wv_window.events.closing += _on_closing
+        _wv_window.events.minimized += _on_minimized
+        _wv_window.events.loaded += _on_loaded
         webview.start(debug=False, icon=str(ico_path) if ico_path.exists() else None)
+    except Exception as exc:
+        logger.warning("PyWebView khởi động thất bại (%s); tự động chuyển sang chế độ trình duyệt.", exc)
+        _wv_window = None
+        _run_browser_fallback()
     finally:
         if _tray_controller is not None:
             _tray_controller.stop()
