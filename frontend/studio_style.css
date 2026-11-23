@@ -963,7 +963,7 @@ sakuga-button#btnStartTranslate {
 .sub-options { display: flex; flex-wrap: wrap; gap: 12px; padding-top: 4px; }
 .settings-divider { height: 1px; background: var(--border); margin: 12px 0; }
 .settings-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; gap: 12px; }
-.settings-row sakuga-toggle { margin: -18px -18px -8px 0 !important; transform: scale(0.58); transform-origin: right center; }
+.settings-row sakuga-toggle { margin: -12px 0 -12px -42px !important; transform: scale(0.58); transform-origin: right center; flex-shrink: 0; }
 
 /* Subtab 4 & View C */
 .shields-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
@@ -1540,9 +1540,10 @@ html[data-theme="obsidian"] .stat-fold { color: #34d399 !important; }
   flex-shrink: 0;
 }
 .dual-quick-actions sakuga-toggle {
-  margin: -22px -18px -18px -6px !important;
+  margin: -12px 0 -12px -42px !important;
   transform: scale(0.56);
   transform-origin: right center;
+  flex-shrink: 0;
 }
 .dual-quick-pair {
   display: flex;
