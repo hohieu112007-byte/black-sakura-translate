@@ -4,6 +4,7 @@ const state = {
   view: "game",       // "home" | "game" | "tools"
   subtab: "overview", // "overview" | "live" | "saved" | "settings"
   theme: localStorage.getItem("sakuga_theme") || "mono-ink",
+  uiLang: localStorage.getItem("sakuga_ui_lang") === "en" ? "en" : "vi",
   games: [],
   selectedGameId: null,
   filter: "all",
@@ -185,6 +186,39 @@ function applyTheme(themeName, elForBurst = null, persistToServer = false) {
   }
 }
 
+function applyUiLanguage(langCode, elForBurst = null, persistToServer = false) {
+  const next = langCode === "en" ? "en" : "vi";
+  state.uiLang = next;
+  if (typeof window.applyUiLanguageToDom === "function") {
+    window.applyUiLanguageToDom(next);
+  }
+  updateStartButtonState();
+  syncDualModelUI();
+  if ($("activePresetBadge") && typeof window.tUI === "function") {
+    $("activePresetBadge").textContent = window.tUI(`preset_badge_${state.preset || "BALANCED"}`);
+  }
+  if (selectedGame()) renderSelectedGamePage();
+  if (state.view === "tools") renderSkillsCatalog();
+
+  if (elForBurst) {
+    fireSakugaVfx(elForBurst, "tap");
+    state.uiLangDirty = true;
+    fetch("/api/ui/lang", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lang: next }),
+    }).catch(() => {});
+    refreshHealth();
+    showToast(next === "en" ? "Switched UI language to English ✓" : "Đã chuyển giao diện sang Tiếng Việt ✓");
+  } else if (persistToServer) {
+    fetch("/api/ui/lang", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lang: next }),
+    }).catch(() => {});
+  }
+}
+
 function showToast(msg, kind = "ok") {
   if (kind === "ok" && msg.length <= 44 && $("sakugaToast")?.show) {
     $("sakugaToast").show(msg);
@@ -331,7 +365,8 @@ function syncDualModelUI(tele = null, opts = {}) {
   if ($("lblUiFastModelName")) $("lblUiFastModelName").textContent = uiFastModel;
   if ($("lblMainStoryModelName")) $("lblMainStoryModelName").textContent = mainModel;
   if ($("dualModeStatusBadge")) {
-    $("dualModeStatusBadge").textContent = dualOn ? "⚡ ĐANG BẬT (Tăng tốc UI)" : "TẮT (1 Model)";
+    const isEn = state.uiLang === "en";
+    $("dualModeStatusBadge").textContent = dualOn ? (isEn ? "⚡ ON (UI Boost)" : "⚡ ĐANG BẬT (Tăng tốc UI)") : (isEn ? "OFF (1 Model)" : "TẮT (1 Model)");
     $("dualModeStatusBadge").className = `badge ${dualOn ? "badge-safe" : ""}`;
   }
   if ($("dualModelPairStrip")) $("dualModelPairStrip").classList.toggle("is-off", !dualOn);
@@ -340,28 +375,39 @@ function syncDualModelUI(tele = null, opts = {}) {
 
   const banner = $("liveActiveModelBanner");
   if (banner) {
+    const isEn = state.uiLang === "en";
     const role = opts.activeModelRole || tele?.active_runtime_role || (state.jobRunning ? "MAIN_STORY" : "IDLE");
     const activeMdl = opts.activeModel || tele?.active_runtime_model || mainModel;
     banner.className = "live-active-model-banner";
     if (!state.jobRunning || role === "IDLE") {
       banner.textContent = dualOn
-        ? `⚡ Dual-Model sẵn sàng: UI [${uiFastModel}] ➔ Xả VRAM ➔ Cốt truyện [${mainModel}]`
-        : `🤖 Model sẵn sàng: ${mainModel} (Dịch toàn bộ UI & Cốt truyện)`;
+        ? (isEn ? `⚡ Dual-Model ready: UI [${uiFastModel}] ➔ Flush VRAM ➔ Story [${mainModel}]` : `⚡ Dual-Model sẵn sàng: UI [${uiFastModel}] ➔ Xả VRAM ➔ Cốt truyện [${mainModel}]`)
+        : (isEn ? `🤖 Model ready: ${mainModel} (All UI & Story)` : `🤖 Model sẵn sàng: ${mainModel} (Dịch toàn bộ UI & Cốt truyện)`);
     } else if (role === "UI_FAST") {
       banner.classList.add("role-ui-fast");
-      banner.textContent = `⚡ ĐANG CHẠY MODEL UI: ${activeMdl} — Quét nhanh nhãn ngắn (Giữ 100% chất lượng thoại cho ${mainModel})`;
+      banner.textContent = isEn
+        ? `⚡ RUNNING UI MODEL: ${activeMdl} — Fast scanning UI labels (${mainModel} handles Story)`
+        : `⚡ ĐANG CHẠY MODEL UI: ${activeMdl} — Quét nhanh nhãn ngắn (Giữ 100% chất lượng thoại cho ${mainModel})`;
     } else if (role === "VRAM_SWAP") {
       banner.classList.add("role-swap");
-      banner.textContent = `🧹 ĐANG XẢ VRAM (keep_alive=0): Gỡ ${uiFastModel} ➔ Nạp 100% VRAM cho ${mainModel}...`;
+      banner.textContent = isEn
+        ? `🧹 FLUSHING VRAM (keep_alive=0): Unloading ${uiFastModel} ➔ Loading 100% VRAM for ${mainModel}...`
+        : `🧹 ĐANG XẢ VRAM (keep_alive=0): Gỡ ${uiFastModel} ➔ Nạp 100% VRAM cho ${mainModel}...`;
     } else if (role === "PRETHINK") {
       banner.classList.add("role-main");
-      banner.textContent = `🧠 ĐANG CHẠY MODEL CHÍNH: ${activeMdl} — Pha 0 lập Từ điển & Style Card`;
+      banner.textContent = isEn
+        ? `🧠 RUNNING MAIN MODEL: ${activeMdl} — Phase 0 Glossary & Style Card`
+        : `🧠 ĐANG CHẠY MODEL CHÍNH: ${activeMdl} — Pha 0 lập Từ điển & Style Card`;
     } else if (role === "QA_POLISH") {
       banner.classList.add("role-main");
-      banner.textContent = `🛠 ĐANG CHẠY MODEL CHÍNH: ${activeMdl} — AI QA kiểm lỗi & chuốt văn phong`;
+      banner.textContent = isEn
+        ? `🛠 RUNNING MAIN MODEL: ${activeMdl} — AI QA Repair & Polish`
+        : `🛠 ĐANG CHẠY MODEL CHÍNH: ${activeMdl} — AI QA kiểm lỗi & chuốt văn phong`;
     } else {
       banner.classList.add("role-main");
-      banner.textContent = `📖 ĐANG CHẠY MODEL CHÍNH: ${activeMdl} — Dịch Cốt truyện / Hội thoại chất lượng cao`;
+      banner.textContent = isEn
+        ? `📖 RUNNING MAIN MODEL: ${activeMdl} — High-Quality Story & Dialogue`
+        : `📖 ĐANG CHẠY MODEL CHÍNH: ${activeMdl} — Dịch Cốt truyện / Hội thoại chất lượng cao`;
     }
   }
 }
@@ -437,11 +483,12 @@ async function refreshHealth() {
     const uiModelLbl = ol.ui_fast_model || data.hardware?.ui_fast_model || "";
     const dualOn = Boolean(ol.dual_model_enabled ?? data.hardware?.dual_model_enabled);
     const tierLbl = ol.tier_label || data.hardware?.hardware?.tier_label || "Auto";
+    const wLbl = state.uiLang === "en" ? "Workers" : "Luồng";
     $("ollamaStatusDot").className = `dot ${ol.online ? (ol.selected_installed === false ? "dot-gold" : "dot-green") : "dot-red"}`;
     $("ollamaStatusText").textContent = ol.online
       ? (dualOn && uiModelLbl && uiModelLbl !== modelLbl
-          ? `Dual: ${uiModelLbl} ⚡ + ${modelLbl} 📖 • ${workers} Luồng`
-          : `${modelLbl} • ${workers} Luồng (${tierLbl})`)
+          ? `Dual: ${uiModelLbl} ⚡ + ${modelLbl} 📖 • ${workers} ${wLbl}`
+          : `${modelLbl} • ${workers} ${wLbl} (${tierLbl})`)
       : `Ollama Offline • ${modelLbl}`;
 
     const tl = data.tools || {};
@@ -459,6 +506,9 @@ async function refreshHealth() {
     }
     if (data.ui_theme && !state.themeDirty && data.ui_theme !== state.theme) {
       applyTheme(data.ui_theme, null, false);
+    }
+    if (data.ui_lang && !state.uiLangDirty && data.ui_lang !== state.uiLang) {
+      applyUiLanguage(data.ui_lang, null, false);
     }
     if (typeof data.minimize_to_tray === "boolean" && $("chkMinimizeToTray")) {
       $("chkMinimizeToTray").checked = data.minimize_to_tray;
@@ -689,7 +739,7 @@ function renderPosterGrid() {
 
   const addCard = document.createElement("div");
   addCard.className = "poster-card poster-add-card";
-  addCard.innerHTML = `<span style="font-size:28px;font-weight:700;">+</span><strong>Thêm Game</strong>`;
+  addCard.innerHTML = `<span style="font-size:28px;font-weight:700;">+</span><strong>${escapeHtml(typeof window.tUI === "function" ? window.tUI("poster_add") : "Thêm Game")}</strong>`;
   addCard.addEventListener("click", openAddGameModal);
   grid.appendChild(addCard);
 }
@@ -704,9 +754,9 @@ function syncActionPackDot(pct) {
 async function renderSelectedGamePage() {
   const g = selectedGame();
   if (!g) {
-    if ($("navGameDetailBtn")) $("navGameDetailBtn").textContent = "Trang Game";
-    $("heroTitle").textContent = "Chưa có game nào trong thư viện";
-    $("heroSubtitle").textContent = "Bấm nút (+) ở góc trên trái hoặc kéo thả thư mục game vào cửa sổ để bắt đầu.";
+    if ($("navGameDetailBtn")) $("navGameDetailBtn").textContent = typeof window.tUI === "function" ? window.tUI("nav_game") : "Trang Game";
+    $("heroTitle").textContent = typeof window.tUI === "function" ? window.tUI("hero_empty_title") : "Chưa có game nào trong thư viện";
+    $("heroSubtitle").textContent = typeof window.tUI === "function" ? window.tUI("hero_empty_sub") : "Bấm nút (+) ở góc trên trái hoặc kéo thả thư mục game vào cửa sổ để bắt đầu.";
     $("btnHeroPlay").disabled = true;
     $("btnStartTranslate").disabled = true;
     syncActionPackDot(0);
@@ -972,9 +1022,11 @@ function renderSlotGrids() {
   if (activeItem) {
     state.injectSlot = activeItem.slot_id;
     $("activeSlotSummary").textContent = `${activeItem.display_name || activeItem.slot_id} (${activeItem.slot_id}) • ${activeItem.badge}`;
-    $("slotGuideBox").textContent = `💡 Hướng dẫn bật trong game: ${activeItem.settings_guide || ""}`;
+    $("slotGuideBox").textContent = state.uiLang === "en"
+      ? `💡 In-game language guide: ${activeItem.settings_guide || ""}`
+      : `💡 Hướng dẫn bật trong game: ${activeItem.settings_guide || ""}`;
   } else {
-    $("activeSlotSummary").textContent = "Chưa có slot khả dụng";
+    $("activeSlotSummary").textContent = state.uiLang === "en" ? "No available slot" : "Chưa có slot khả dụng";
   }
 
   for (const grid of grids) {
@@ -1018,7 +1070,7 @@ function applyPresetLevel(levelKey, triggerVfx = true) {
   state.scope = def.scope;
 
   document.querySelectorAll(".preset-card").forEach((c) => c.classList.toggle("active", c.dataset.preset === levelKey));
-  $("activePresetBadge").textContent = def.badge;
+  $("activePresetBadge").textContent = typeof window.tUI === "function" ? window.tUI(`preset_badge_${levelKey}`) : def.badge;
 
   document.querySelectorAll("#scopeSegmented .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.scope === def.scope));
   $("subOptionsDrawer").classList.toggle("hidden", def.scope !== "SUB_ONLY");
@@ -1036,9 +1088,12 @@ function applyPresetLevel(levelKey, triggerVfx = true) {
 
   const est = state.estimates?.[levelKey];
   if (est) {
-    $("etaCalibratedLabel").textContent = `Ước lượng mức này: ${est.est_label} (${est.pending_count || 0} câu)`;
+    const isEn = state.uiLang === "en";
+    $("etaCalibratedLabel").textContent = isEn
+      ? `Est. for tier: ${est.est_label} (${est.pending_count || 0} lines)`
+      : `Ước lượng mức này: ${est.est_label} (${est.pending_count || 0} câu)`;
     if (!state.jobRunning) {
-      $("teleEta").textContent = `Dự kiến: ${est.est_label}`;
+      $("teleEta").textContent = isEn ? `ETA: ${est.est_label}` : `Dự kiến: ${est.est_label}`;
       $("teleEtaMini").textContent = est.est_label;
     }
   }
@@ -1055,9 +1110,12 @@ function renderPresetEstimates(estimates) {
   }
   const act = estimates[state.preset];
   if (act) {
-    $("etaCalibratedLabel").textContent = `Ước lượng mức đang chọn: ${act.est_label} (${act.pending_count || 0} câu)`;
+    const isEn = state.uiLang === "en";
+    $("etaCalibratedLabel").textContent = isEn
+      ? `Est. for tier: ${act.est_label} (${act.pending_count || 0} lines)`
+      : `Ước lượng mức đang chọn: ${act.est_label} (${act.pending_count || 0} câu)`;
     if (!state.jobRunning) {
-      $("teleEta").textContent = `Dự kiến: ${act.est_label}`;
+      $("teleEta").textContent = isEn ? `ETA: ${act.est_label}` : `Dự kiến: ${act.est_label}`;
       $("teleEtaMini").textContent = act.est_label;
     }
   }
@@ -1066,7 +1124,7 @@ function renderPresetEstimates(estimates) {
 function markCustomPresetIfModified() {
   state.preset = "CUSTOM";
   document.querySelectorAll(".preset-card").forEach((c) => c.classList.remove("active"));
-  $("activePresetBadge").textContent = "TÙY CHỈNH THỦ CÔNG";
+  $("activePresetBadge").textContent = typeof window.tUI === "function" ? window.tUI("preset_badge_CUSTOM") : "TÙY CHỈNH THỦ CÔNG";
 }
 
 // ---------------- Monitor & Inline Editor ---------------- //
@@ -1076,9 +1134,13 @@ function setPrethinkContent(text) {
   const out = $("prethinkOutput");
   const det = $("prethinkDetails");
   const hint = $("prethinkSummaryHint");
-  if (out) out.textContent = clean || "Chưa có nhật ký Pre-Think.";
+  if (out) out.textContent = clean || (typeof window.tUI === "function" ? window.tUI("prethink_empty") : "Chưa có nhật ký Pre-Think.");
   if (det) det.open = Boolean(clean);
-  if (hint) hint.textContent = clean ? "• Đã phân tích ✓" : "• Thu gọn (chưa có log)";
+  if (hint) {
+    hint.textContent = clean
+      ? (typeof window.tUI === "function" ? window.tUI("prethink_ready_hint") : "• Đã phân tích ✓")
+      : (typeof window.tUI === "function" ? window.tUI("prethink_collapsed_hint") : "• Thu gọn (chưa có log)");
+  }
 }
 
 async function refreshStudioMonitor(gameId) {
@@ -1105,7 +1167,8 @@ async function refreshStudioMonitor(gameId) {
     }
     if (mon.progress) {
       const pct = mon.progress.pct || 0;
-      $("teleProgress").textContent = `Tiến độ: ${pct}% (${mon.progress.done || 0}/${mon.progress.total || 0})`;
+      const pLbl = state.uiLang === "en" ? "Progress" : "Tiến độ";
+      $("teleProgress").textContent = `${pLbl}: ${pct}% (${mon.progress.done || 0}/${mon.progress.total || 0})`;
       $("statProgressMini").textContent = `${pct}%`;
       syncActionPackDot(pct);
       const sp = $("sakugaProgressBar");
@@ -1118,7 +1181,8 @@ async function refreshStudioMonitor(gameId) {
 function renderSavedTranslations(savedList, cacheDbPath, game) {
   const tabBtn = document.querySelector('.subtab[data-subtab="saved"]');
   if (tabBtn) {
-    tabBtn.textContent = savedList && savedList.length ? `Kho bản dịch & An toàn (${savedList.length})` : "Kho bản dịch & An toàn";
+    const baseTab = typeof window.tUI === "function" ? window.tUI("tab_saved") : "Kho bản dịch & An toàn";
+    tabBtn.textContent = savedList && savedList.length ? `${baseTab} (${savedList.length})` : baseTab;
   }
   const box = $("savedTranslationsList");
   const pathLbl = $("savedCachePathLabel");
@@ -1128,7 +1192,7 @@ function renderSavedTranslations(savedList, cacheDbPath, game) {
   if (!box) return;
   box.innerHTML = "";
   if (!savedList || !savedList.length) {
-    box.innerHTML = `<div class="empty-state">Chưa có bản dịch nào được lưu trong SQLite cho game này.</div>`;
+    box.innerHTML = `<div class="empty-state">${escapeHtml(typeof window.tUI === "function" ? window.tUI("saved_empty") : "Chưa có bản dịch nào được lưu trong SQLite cho game này.")}</div>`;
     return;
   }
 
@@ -1446,9 +1510,9 @@ function updateStartButtonState() {
   if (!g) { btn.disabled = true; return; }
   const blockedLocked = g.anticheat_status === "BLOCKED" && !$("chkOfflineOverride").checked;
   btn.disabled = blockedLocked;
-  if (blockedLocked) btn.textContent = "🛡 KHÓA ANTI-CHEAT";
-  else if (state.jobRunning) btn.textContent = state.jobPaused ? "⚡ Tiếp tục" : "⏸ Tạm dừng";
-  else btn.textContent = "⚡ DỊCH NGAY";
+  if (blockedLocked) btn.textContent = typeof window.tUI === "function" ? window.tUI("btn_ac_locked") : "🛡 KHÓA ANTI-CHEAT";
+  else if (state.jobRunning) btn.textContent = state.jobPaused ? (typeof window.tUI === "function" ? window.tUI("btn_resume") : "⚡ Tiếp tục") : (typeof window.tUI === "function" ? window.tUI("btn_pause") : "⏸ Tạm dừng");
+  else btn.textContent = typeof window.tUI === "function" ? window.tUI("btn_translate") : "⚡ DỊCH NGAY";
 }
 
 async function runTranslationWithPreset(presetKey = null) {
@@ -2307,6 +2371,7 @@ function bindEvents() {
   $("btnSidebarHome").addEventListener("click", () => switchView("home"));
   document.querySelectorAll(".subtab").forEach((t) => t.addEventListener("click", () => switchSubtab(t.dataset.subtab)));
   document.querySelectorAll(".swatch").forEach((sw) => sw.addEventListener("click", () => applyTheme(sw.dataset.themePick, sw)));
+  document.querySelectorAll("#uiLangSwitcher .lang-btn").forEach((btn) => btn.addEventListener("click", () => applyUiLanguage(btn.dataset.langPick, btn)));
 
   $("globalSearchInput").addEventListener("input", (e) => {
     state.search = e.target.value || "";
@@ -2635,6 +2700,7 @@ function bindEvents() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   applyTheme(state.theme, null);
+  applyUiLanguage(state.uiLang, null);
   bindEvents();
   setupDragDropOverlay();
   setupSSE();

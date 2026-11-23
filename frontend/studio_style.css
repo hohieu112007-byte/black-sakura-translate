@@ -403,6 +403,38 @@ sakuga-button#btnStartTranslate {
 }
 .swatch.active { outline: 2px solid var(--accent); outline-offset: 1.5px; }
 
+.lang-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--chip);
+  border: 1.5px solid var(--border-strong);
+  box-shadow: 0 2px 0 var(--bevel-lip);
+  flex-shrink: 0;
+}
+.lang-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  line-height: 1.25;
+  white-space: nowrap;
+  transition: background 140ms ease, color 140ms ease, transform 110ms ease;
+}
+.lang-btn:hover { color: var(--ink); }
+.lang-btn.active {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 800;
+}
+
 /* ==================== STEAM 2-PANE SHELL ==================== */
 .steam-shell {
   height: calc(100vh - 46px - 32px);

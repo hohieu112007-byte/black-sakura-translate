@@ -325,6 +325,10 @@ class UiThemeRequest(BaseModel):
     theme: str = "mono-ink"
 
 
+class UiLangRequest(BaseModel):
+    lang: str = "vi"
+
+
 class MinimizeTrayRequest(BaseModel):
     enabled: bool = True
 
@@ -440,6 +444,7 @@ async def api_health():
         "tm_stats": global_tm.stats(),
         "supported_langs": QWEN35_SUPPORTED_LANGS,
         "ui_theme": library_db.get_setting("ui_theme", "mono-ink"),
+        "ui_lang": library_db.get_setting("ui_lang", "vi"),
         "minimize_to_tray": library_db.get_setting("minimize_to_tray", "1") == "1",
     }
 
@@ -450,6 +455,13 @@ async def api_save_ui_theme(req: UiThemeRequest):
     theme = req.theme if req.theme in allowed else "mono-ink"
     library_db.set_setting("ui_theme", theme)
     return {"ok": True, "theme": theme}
+
+
+@app.post("/api/ui/lang")
+async def api_save_ui_lang(req: UiLangRequest):
+    lang = "en" if (req.lang or "").strip().lower() == "en" else "vi"
+    library_db.set_setting("ui_lang", lang)
+    return {"ok": True, "lang": lang}
 
 
 @app.post("/api/ui/minimize-to-tray")

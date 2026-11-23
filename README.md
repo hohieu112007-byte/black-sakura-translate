@@ -18,7 +18,10 @@
 ![Bảng Dịch Trực Tiếp & Từ điển](docs/screenshots/02-live-editor.png)
 
 <details>
-<summary><b>📸 Xem thêm ảnh: Thư viện Ảnh bìa Steam & Kho Skill 2 Lớp (5 Giao diện màu)</b></summary>
+<summary><b>📸 Xem thêm ảnh: Giao diện Tiếng Anh (VI / EN), Thư viện Steam & Kho Skill 2 Lớp</b></summary>
+
+#### Chế độ Tiếng Anh (nút chuyển nhanh `VI | EN` trên thanh trên cùng)
+![Giao diện Tiếng Anh Black Sakura Translate](docs/screenshots/05-english-obsidian.png)
 
 #### Thư viện Game phong cách Steam Poster 2:3
 ![Thư viện Game Steam-style](docs/screenshots/04-library-obsidian.png)
@@ -32,23 +35,12 @@
 
 ## Tính năng nổi bật
 
-- **100% AI Local (Ollama) & Tự động cân chỉnh phần cứng:** Tự nhận diện GPU/VRAM và RAM để tự tinh chỉnh số luồng song song, `num_ctx`, KV-Cache và kích thước batch. Hỗ trợ chế độ **Dual-Model** (dùng model nhẹ quét nhanh UI/Menu rồi xả VRAM cho model chính dịch Cốt truyện) và **Chế độ Êm ái cho Laptop / USB Audio-Safe** (giới hạn luồng + nghỉ nhịp 65ms chống nóng máy & nhiễu USB DAC/tai nghe).
-- **Hỗ trợ nhiều Engine & định dạng game phổ biến:**
-  - **Unity** (Mono / IL2CPP, Addressables `catalog.bin` & `catalog.json`, `StringTable` / `SharedTableData`, tự đổi nhãn ngôn ngữ trong game thành *Tiếng Việt* và vá Font Unicode).
-  - **Unreal Engine 4/5** (`.locres`, `.pak` mod riêng qua `Content/Paks/~mods/`).
-  - **Ren'Py** (`.rpy`, `.rpa`), **JSON**, **CSV**, **PO**, **YAML**, **XML**, **TXT**.
-- **Kho Skill 2 Lớp (Language Bridge + Style Skill):** Đi kèm 17 Skill dựng sẵn (11 cầu ngôn ngữ như `EN → VI`, `FR → VI`, `JA → VI`, `ZH → VI`, `KO → VI`... và 6 phong cách văn phong như *Chuẩn Tự Nhiên*, *Kinh Dị*, *Khoa Học Viễn Tưởng*, *Kiếm Hiệp / Huyền Huyễn*, *Visual Novel / Anime*, *Co-op Hài Hước*). Hỗ trợ tạo, chỉnh sửa No-Code hoặc nhập/xuất `.md` / `.zip`.
-- **3 Mức độ dịch thông minh & Suy luận Pha 0 (Pre-Think):** Tự lập Từ điển Thuật ngữ (Glossary) và thẻ văn phong (Style Card) cố định trên đỉnh KV-Cache, kèm chống trùng lặp (Deduplication + Template Folding `__NUM_x__`) và Global Translation Memory (0ms).
-- **Trình sửa bản dịch trực tiếp (Live Editor):** Tìm kiếm toàn bộ cơ sở dữ liệu SQLite, lọc theo loại câu (`UI`, `Sub`, `Đã sửa tay`, `Lỗi`), **Thay thế hàng loạt có khóa thẻ code**, và **Ghi nóng (Hot-Apply)** thẳng vào game trong vài giây không cần dịch lại.
-- **Chia sẻ cộng đồng `.sakugapack` (1-Click):** Xuất và nhập gói bản dịch + từ điển thuật ngữ chỉ bằng một cú bấm.
-- **Theo dõi cập nhật Steam (Delta Update):** Tự phát hiện khi game vừa cập nhật hoặc Verify Files trên Steam, giữ nguyên toàn bộ câu đã dịch trước đó và chỉ dịch bổ sung các câu mới.
-- **Hệ thống Bảo vệ 6 Lớp:**
-  1. **Anti-Cheat Ban Protection:** Tự quét EAC / BattlEye / Vanguard / Ricochet... và khóa chỉnh sửa file game online có Anti-Cheat để bảo vệ tài khoản.
-  2. **Clean External Backup (SHA-256):** Sao lưu file gốc ra thư mục `backups/` bên ngoài thư mục game; khôi phục 100% nguyên bản chỉ với 1 nút bấm.
-  3. **Native Slot Injection:** Gợi ý chèn vào slot ngôn ngữ an toàn (ưu tiên các slot Latin ít dùng để giữ nguyên tiếng Anh gốc).
-  4. **Tag Firewall (`__TAG_x__`):** Khóa toàn bộ thẻ màu, biến số, xuống dòng (`<color>`, `{0}`, `%s`, `\n`, `[g:...]`) chống hỏng game.
-  5. **Encoding & Font Guard:** Giữ nguyên UTF-8 BOM / CRLF, tự vá font Tiếng Việt chống ô vuông/lỗi dấu.
-  6. **Atomic Writes & Crash Recovery:** Ghi file nguyên tử và lưu nhật ký SQLite theo từng batch — lỡ mất điện hay tắt máy vẫn chạy nối tiếp đúng chỗ đang dở.
+- **100% AI Local (Ollama) & Tự tối ưu phần cứng:** Tự chỉnh luồng/VRAM theo GPU; hỗ trợ **Dual-Model** (model nhẹ quét UI, model chính dịch thoại) và **Quiet Mode** (giảm nóng laptop & bảo vệ tai nghe USB).
+- **Hỗ trợ đa Engine:** Unity (Mono/IL2CPP, Addressables `catalog.bin/.json`, tự đổi nhãn *Tiếng Việt*), Unreal Engine (`.locres`, `.pak`), Ren'Py (`.rpy`, `.rpa`), JSON, CSV, PO, YAML, XML, TXT.
+- **Kho Skill 2 Lớp & Suy luận Pha 0:** 17 Skill dựng sẵn (Cầu ngôn ngữ + Văn phong), tự lập Từ điển Thuật ngữ, chống trùng lặp + Global TM 0ms.
+- **Live Editor & Ghi nóng:** Tìm kiếm toàn DB, lọc theo loại câu, thay thế hàng loạt bảo vệ thẻ code và ghi thẳng vào game trong vài giây.
+- **Chia sẻ `.sakugapack` & Delta Update:** Xuất/nhập bản dịch 1-Click; tự giữ bản dịch cũ và chỉ dịch câu mới khi Steam cập nhật game.
+- **An toàn 6 Lớp & Giao diện song ngữ `VI / EN`:** Chặn game online có Anti-Cheat, sao lưu gốc SHA-256 khôi phục 1-Click, Tag Firewall, vá Font Unicode, chạy ngầm khay hệ thống.
 
 ---
 
