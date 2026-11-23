@@ -15,14 +15,14 @@ PHẦN 1: YÊU CẦU HỆ THỐNG & CÀI ĐẶT LẦN ĐẦU
    - Tải tại: https://www.python.org/downloads/
    - QUAN TRỌNG: Khi cài đặt, nhớ tích chọn "Add Python to PATH".
 3. Cài Ollama (chạy AI Local ngay trên máy):
-   - Tải tại: https://ollama.com/
-   - Cài xong, mở Ollama (kiểm tra có biểu tượng Ollama ở khay hệ thống).
-   - Mở Terminal / CMD và tải model khuyên dùng:
+   - Khi mở app lần đầu mà chưa có Ollama hoặc chưa có model, Black Sakura
+     Translate sẽ tự hiện thanh hướng dẫn 1-Click ngay trên đầu màn hình:
+     + Bấm "Tải Ollama (Miễn phí)" -> cài xong bấm "Mở Ollama ngay".
+     + Bấm "Tải ngay qwen3.5:4b & Tự kết nối" -> tải xong app TỰ ĐỘNG kết nối
+       và lưu cấu hình, không cần gõ dòng lệnh!
+   - Hoặc nếu muốn tải thủ công bằng Terminal / CMD:
        ollama pull qwen3.5:4b
-   - (Tùy chọn — nếu muốn bật Dual-Model tăng tốc UI):
-       ollama pull qwen3:1.7b
-   - Mẹo: Bạn cũng có thể tải model trực tiếp ngay bên trong app (bấm vào ô
-     trạng thái Ollama ở góc trên bên phải -> chọn Model -> bấm "Tải Model").
+       ollama pull qwen3:1.7b   (tùy chọn cho chế độ Dual-Model tăng tốc UI)
 
 --------------------------------------------------------------------------------
 PHẦN 2: KHỞI ĐỘNG ỨNG DỤNG

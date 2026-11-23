@@ -39,12 +39,10 @@
 ## Cài đặt & Khởi chạy nhanh
 
 ### Cách 1: Chạy 1-Click trên Windows (Khuyên dùng)
-1. Cài **Python 3.10+** và **Ollama** (sau đó kéo model mặc định trong terminal hoặc ngay bên trong app):
-   ```bash
-   ollama pull qwen3.5:4b
-   ```
+1. Cài **Python 3.10+** và **Ollama** (tải tại [ollama.com](https://ollama.com/download)).
 2. Tải mã nguồn về máy (`git clone` hoặc tải file ZIP rồi giải nén).
-3. Nháy đúp **`Start_Black_Sakura_Translate.bat`** — script sẽ tự kiểm tra/cài đặt các thư viện trong `requirements.txt` nếu thiếu và mở ứng dụng.
+3. Nháy đúp **`Start_Black_Sakura_Translate.bat`** — script tự cài thư viện Python nếu thiếu và mở ứng dụng.
+4. **Kết nối Model AI không cần dòng lệnh:** Lần đầu mở app, nếu Ollama chưa chạy hoặc chưa tải model, thanh thiết lập nhanh sẽ tự hiện ngay trên đầu màn hình với các nút **▶ Mở Ollama ngay** và **⬇ Tải ngay `qwen3.5:4b` & Tự kết nối** (tải xong tự gắn làm model chính sẵn sàng dịch ngay).
 
 ### Cách 2: Chạy bằng dòng lệnh (CLI)
 ```bash

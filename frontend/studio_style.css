@@ -1600,4 +1600,50 @@ html[data-theme="obsidian"] .live-active-model-banner.role-main { color: #60a5fa
   cursor: pointer;
 }
 
+/* First-Time / Offline Ollama Onboarding Banner */
+.ollama-setup-banner {
+  position: relative;
+  z-index: 5;
+  margin: 12px 26px 0;
+  padding: 12px 15px;
+  border-radius: 12px;
+  border: 1.5px solid var(--accent);
+  background: var(--surface);
+  box-shadow: 0 6px 18px -6px rgba(0, 0, 0, 0.2), 0 3px 0 var(--bevel-lip);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ollama-setup-banner.is-offline {
+  border-color: var(--red);
+}
+.ollama-setup-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ollama-setup-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 240px;
+  flex: 1;
+}
+.ollama-setup-info strong {
+  font-size: 13px;
+  color: var(--ink);
+}
+.ollama-setup-info p {
+  margin: 0;
+  line-height: 1.4;
+}
+.ollama-setup-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
 

@@ -102,6 +102,28 @@
     <!-- RIGHT MAIN WORKSPACE STAGE -->
     <main class="steam-main">
       <div id="ambientGameBackdrop" class="ambient-backdrop"></div>
+
+      <!-- First-Time / Offline Ollama 1-Click Onboarding Banner -->
+      <div id="ollamaSetupBanner" class="ollama-setup-banner hidden">
+        <div class="ollama-setup-top">
+          <div class="ollama-setup-info">
+            <strong id="ollamaSetupTitle">🤖 Thiết lập AI Local (Ollama) để bắt đầu dịch miễn phí</strong>
+            <p id="ollamaSetupDesc" class="mono-mini">Ứng dụng dùng Ollama chạy AI ngay trên máy bạn (không cần API key).</p>
+          </div>
+          <div class="ollama-setup-actions">
+            <button id="btnDownloadOllama" type="button" class="btn btn-outline btn-sm hidden">⬇ Tải Ollama (Miễn phí)</button>
+            <button id="btnLaunchOllama" type="button" class="btn btn-outline btn-sm hidden">▶ Mở Ollama ngay</button>
+            <button id="btnRecheckOllama" type="button" class="btn btn-ghost btn-sm hidden">↻ Kiểm tra lại</button>
+            <button id="btnQuickPullRecommended" type="button" class="btn btn-outline btn-sm hidden">⬇ Tải ngay qwen3.5:4b &amp; Tự kết nối</button>
+            <button id="btnOpenHwFromBanner" type="button" class="btn btn-ghost btn-sm">⚙ Chọn Model AI</button>
+          </div>
+        </div>
+        <div id="bannerPullProgressWrap" class="pull-progress-wrap hidden">
+          <div class="pull-bar-bg"><div id="bannerPullProgressBar" class="pull-bar-fill" style="width:0%;"></div></div>
+          <span id="bannerPullProgressText" class="mono-mini">Đang kết nối Ollama...</span>
+        </div>
+      </div>
+
       <!-- VIEW A: STEAM HOME (2:3 COVER POSTER SHELF) -->
       <section id="viewHome" class="main-view">
         <div class="home-header">
@@ -718,6 +740,15 @@
       </div>
       <div class="modal-body">
         <div id="hwDetectedSummary" class="hw-summary-card">Đang kiểm tra GPU NVIDIA / RAM hệ thống...</div>
+        <div id="hwModalOfflineStrip" class="repair-banner hidden" style="margin:0;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
+            <span class="mono-mini"><strong>⚠ Ollama chưa chạy:</strong> Hãy cài đặt miễn phí tại ollama.com hoặc bấm mở Ollama nếu máy bạn đã cài.</span>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button id="btnModalDownloadOllama" type="button" class="btn btn-sm btn-outline">⬇ Tải Ollama</button>
+              <button id="btnModalLaunchOllama" type="button" class="btn btn-sm btn-outline">▶ Mở Ollama ngay</button>
+            </div>
+          </div>
+        </div>
         <div id="ollamaEnvWarnBox" class="repair-banner hidden" style="margin:0;">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
             <span id="ollamaEnvWarnText" class="mono-mini"></span>

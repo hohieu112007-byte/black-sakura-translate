@@ -2026,6 +2026,86 @@ async def api_ollama_pull(req: PullModelRequest):
         raise HTTPException(status_code=500, detail=f"Lỗi tải model {model}: {exc}")
 
 
+@app.post("/api/ollama/launch")
+async def api_ollama_launch():
+    """Attempt to launch local Ollama desktop app or background server for first-time users."""
+    import shutil
+    import subprocess
+
+    cur = await qwen_engine.check_ollama_status()
+    if cur.get("online"):
+        return {"ok": True, "already_running": True, "installed": True, "online": True, "ollama": cur}
+
+    candidates = []
+    if os.name == "nt":
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            candidates.append((Path(local_app) / "Programs" / "Ollama" / "ollama app.exe", []))
+            candidates.append((Path(local_app) / "Programs" / "Ollama" / "ollama.exe", ["serve"]))
+    cli_path = shutil.which("ollama")
+    if cli_path:
+        candidates.append((Path(cli_path), ["serve"]))
+
+    chosen = next(((p, extra) for p, extra in candidates if p.exists() and p.is_file()), None)
+    if not chosen:
+        return {
+            "ok": False,
+            "installed": False,
+            "online": False,
+            "download_url": "https://ollama.com/download",
+            "message": "Chưa tìm thấy Ollama trên máy. Hãy bấm 'Tải Ollama (Miễn phí)' để cài đặt trong 1 phút.",
+        }
+
+    exe_path, extra_args = chosen
+    try:
+        kwargs: Dict[str, Any] = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "stdin": subprocess.DEVNULL,
+        }
+        if os.name == "nt":
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            if extra_args:
+                flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            kwargs["creationflags"] = flags
+        subprocess.Popen([str(exe_path), *extra_args], **kwargs)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "installed": True,
+            "online": False,
+            "message": f"Không khởi động được Ollama tự động: {exc}",
+        }
+
+    latest = cur
+    for _ in range(6):
+        await asyncio.sleep(0.75)
+        latest = await qwen_engine.check_ollama_status()
+        if latest.get("online"):
+            break
+
+    return {
+        "ok": True,
+        "installed": True,
+        "launched": True,
+        "online": bool(latest.get("online")),
+        "ollama": latest,
+        "message": "Ollama đã khởi động và kết nối thành công!" if latest.get("online") else "Đã mở Ollama, vui lòng đợi vài giây để máy chủ sẵn sàng.",
+    }
+
+
+@app.post("/api/ollama/open-download")
+async def api_ollama_open_download():
+    import webbrowser
+
+    url = "https://ollama.com/download"
+    try:
+        webbrowser.open(url)
+        return {"ok": True, "url": url}
+    except Exception as exc:
+        return {"ok": False, "url": url, "message": str(exc)}
+
+
 @app.get("/api/skills")
 async def api_list_skills(
     source_lang: Optional[str] = None,

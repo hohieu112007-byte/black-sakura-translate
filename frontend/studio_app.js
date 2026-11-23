@@ -448,6 +448,8 @@ async function refreshHealth() {
     $("toolsStatusDot").className = `dot ${tl.all_ready ? "dot-green" : "dot-gold"}`;
     $("toolsStatusText").textContent = tl.all_ready ? "Tools Ready" : `Tools ${tl.ready_count || 0}/${tl.total_count || 5}`;
 
+    syncOllamaOnboardingBanner(ol, data.hardware || state.hardware);
+
     if (data.telemetry) updateLiveTelemetryUI(data.telemetry);
     else syncDualModelUI();
     if (data.tm_stats) $("tmTotalCount").textContent = data.tm_stats.count || 0;
@@ -462,6 +464,110 @@ async function refreshHealth() {
       $("chkMinimizeToTray").checked = data.minimize_to_tray;
     }
   } catch (_) {}
+}
+
+function getBestRecommendedModelName(ol, hw) {
+  const recs = ol?.recommended_models || hw?.hardware?.recommended_models || [];
+  if (recs.length && recs[0]?.name) return recs[0].name;
+  return ol?.main_model || hw?.main_model || "qwen3.5:4b";
+}
+
+function syncOllamaOnboardingBanner(ol = null, hw = null) {
+  const banner = $("ollamaSetupBanner");
+  const modalStrip = $("hwModalOfflineStrip");
+  const status = ol || state.ollamaStatus || {};
+  const online = Boolean(status.online);
+  const selectedInstalled = status.selected_installed !== false;
+  const installedList = Array.isArray(status.models) ? status.models : [];
+
+  if (modalStrip) modalStrip.classList.toggle("hidden", online);
+  if (!banner) return;
+
+  if (online && selectedInstalled) {
+    banner.classList.add("hidden");
+    banner.classList.remove("is-offline");
+    return;
+  }
+
+  banner.classList.remove("hidden");
+  const btnDl = $("btnDownloadOllama");
+  const btnLaunch = $("btnLaunchOllama");
+  const btnRecheck = $("btnRecheckOllama");
+  const btnPull = $("btnQuickPullRecommended");
+  const btnOpenHw = $("btnOpenHwFromBanner");
+
+  if (!online) {
+    banner.classList.add("is-offline");
+    if ($("ollamaSetupTitle")) $("ollamaSetupTitle").textContent = "⚠ Chưa kết nối được với Ollama AI Local";
+    if ($("ollamaSetupDesc")) {
+      $("ollamaSetupDesc").textContent =
+        "Black Sakura Translate dùng Ollama chạy AI miễn phí ngay trên máy bạn. Nếu chưa cài hãy bấm 'Tải Ollama', nếu đã cài hãy bấm 'Mở Ollama ngay'.";
+    }
+    btnDl?.classList.remove("hidden");
+    btnLaunch?.classList.remove("hidden");
+    btnRecheck?.classList.remove("hidden");
+    btnPull?.classList.add("hidden");
+    if (btnOpenHw) btnOpenHw.textContent = "⚙ Cấu hình AI";
+  } else {
+    banner.classList.remove("is-offline");
+    const recModel = getBestRecommendedModelName(status, hw);
+    const activeWant = status.main_model || recModel;
+    btnDl?.classList.add("hidden");
+    btnLaunch?.classList.add("hidden");
+    btnRecheck?.classList.add("hidden");
+    btnPull?.classList.remove("hidden");
+    if (btnPull) {
+      btnPull.dataset.model = recModel;
+      btnPull.textContent = `⬇ Tải ngay ${recModel} & Tự kết nối`;
+    }
+    if (installedList.length > 0) {
+      const sample = installedList.slice(0, 3).join(", ");
+      if ($("ollamaSetupTitle")) $("ollamaSetupTitle").textContent = `🤖 Model '${activeWant}' chưa tải — nhưng máy bạn đã có sẵn ${installedList.length} model!`;
+      if ($("ollamaSetupDesc")) {
+        $("ollamaSetupDesc").textContent = `Model có sẵn trên Ollama: ${sample}. Bạn có thể tải '${recModel}' bằng 1 nút hoặc bấm 'Chọn model có sẵn' để dùng ngay.`;
+      }
+      if (btnOpenHw) btnOpenHw.textContent = "⚙ Chọn model có sẵn";
+    } else {
+      if ($("ollamaSetupTitle")) $("ollamaSetupTitle").textContent = "🚀 Ollama đã kết nối! Chỉ còn 1 bước: Tải Model AI để dịch";
+      if ($("ollamaSetupDesc")) {
+        $("ollamaSetupDesc").textContent = `Chưa có model nào trên Ollama. Bấm nút bên phải để tải '${recModel}' ngay trong app — tải xong hệ thống sẽ tự động kết nối và lưu cấu hình!`;
+      }
+      if (btnOpenHw) btnOpenHw.textContent = "⚙ Chọn model khác";
+    }
+  }
+}
+
+async function openOllamaDownloadPage() {
+  try {
+    await api("/api/ollama/open-download", { method: "POST" });
+    showToast("Đã mở trang tải Ollama (https://ollama.com/download) trên trình duyệt!");
+  } catch (_) {
+    window.open("https://ollama.com/download", "_blank");
+  }
+}
+
+async function launchOllamaFromUI(btnEl = null) {
+  if (btnEl) btnEl.disabled = true;
+  try {
+    showToast("Đang tìm và khởi động Ollama trên máy...");
+    const res = await api("/api/ollama/launch", { method: "POST" });
+    if (res.ollama) state.ollamaStatus = res.ollama;
+    await refreshHealth();
+    if (!$("modalHardwareSettings")?.classList.contains("hidden")) {
+      await openHardwareModal();
+    }
+    if (res.online) {
+      showToast("Đã khởi động & kết nối Ollama thành công ✓");
+    } else if (res.installed === false) {
+      showToast(res.message || "Chưa cài Ollama trên máy. Hãy bấm 'Tải Ollama (Miễn phí)'.", "error");
+    } else {
+      showToast(res.message || "Đã mở Ollama, vui lòng đợi vài giây rồi bấm 'Kiểm tra lại'.");
+    }
+  } catch (err) {
+    showToast(err.message, "error");
+  } finally {
+    if (btnEl) btnEl.disabled = false;
+  }
 }
 
 // ---------------- Games List & Steam Hero Rendering ---------------- //
@@ -1347,6 +1453,23 @@ async function runTranslationWithPreset(presetKey = null) {
   const g = selectedGame();
   if (!g) return;
   if (presetKey) applyPresetLevel(presetKey, true);
+
+  // Friendly pre-flight check so first-time users know exactly how to connect Ollama / pull a model
+  if (!state.ollamaStatus || !state.ollamaStatus.online || state.ollamaStatus.selected_installed === false) {
+    await refreshHealth();
+  }
+  if (!state.ollamaStatus?.online) {
+    showToast("Ollama chưa chạy! Hãy bấm 'Mở Ollama ngay' hoặc 'Tải Ollama' trong cửa sổ vừa mở.", "error");
+    openHardwareModal();
+    return;
+  }
+  if (state.ollamaStatus?.selected_installed === false) {
+    const rec = getBestRecommendedModelName(state.ollamaStatus, state.hardware);
+    showToast(`Model AI chưa được tải trên Ollama! Hãy bấm '⬇ Tải về' (${rec}) hoặc chọn model có sẵn.`, "error");
+    openHardwareModal();
+    return;
+  }
+
   try {
     state.jobRunning = true;
     state.jobPaused = false;
@@ -1800,6 +1923,7 @@ async function openHardwareModal() {
     const warnTxt = hwEff.ollama_env_warning || mdlRes.ollama_env_warning || "";
     $("ollamaEnvWarnBox").classList.toggle("hidden", !warnTxt);
     $("ollamaEnvWarnText").textContent = warnTxt;
+    syncOllamaOnboardingBanner(mdlRes, hwEff);
 
     const installed = mdlRes.models_meta || [];
     const mainSel = $("selectMainModel");
@@ -1843,29 +1967,73 @@ async function openHardwareModal() {
   }
 }
 
-async function pullRecommendedModel() {
-  const mdl = ($("selectRecommendModel")?.value || "").trim();
+async function pullModelAndAutoLink(modelName, fromBanner = false) {
+  const mdl = (modelName || "").trim();
   if (!mdl) return;
-  const btn = $("btnPullModel");
-  btn.disabled = true;
-  $("pullProgressWrap").classList.remove("hidden");
-  $("pullProgressBar").style.width = "4%";
-  $("pullProgressText").textContent = `Đang bắt đầu tải ${mdl}...`;
+  const btnModal = $("btnPullModel");
+  const btnBanner = $("btnQuickPullRecommended");
+  if (btnModal) btnModal.disabled = true;
+  if (btnBanner) btnBanner.disabled = true;
+
+  if ($("pullProgressWrap")) $("pullProgressWrap").classList.remove("hidden");
+  if ($("pullProgressBar")) $("pullProgressBar").style.width = "4%";
+  if ($("pullProgressText")) $("pullProgressText").textContent = `Đang bắt đầu tải ${mdl}...`;
+
+  if (fromBanner && $("bannerPullProgressWrap")) {
+    $("bannerPullProgressWrap").classList.remove("hidden");
+    if ($("bannerPullProgressBar")) $("bannerPullProgressBar").style.width = "4%";
+    if ($("bannerPullProgressText")) $("bannerPullProgressText").textContent = `Đang tải ${mdl} về Ollama Local...`;
+  }
+
   try {
-    await api("/api/ollama/pull", {
+    const pullRes = await api("/api/ollama/pull", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: mdl }),
     });
-    showToast(`Đã tải xong model ${mdl}!`);
-    await Promise.all([refreshHealth(), openHardwareModal()]);
-    if ($("selectMainModel")) $("selectMainModel").value = mdl;
+
+    // Auto-link downloaded model immediately so beginners never forget to click "Lưu cấu hình AI"
+    const isSmallUiHelper = /(?:^|:)(?:0\.\d+b|1\.[0-9]b|2b)(?:\b|$)/i.test(mdl);
+    const hasExistingMain = Boolean(state.ollamaStatus?.selected_installed);
+    const dualChecked = Boolean($("chkDualModel")?.checked || state.hardware?.dual_model_enabled);
+    const linkPayload = (isSmallUiHelper && hasExistingMain && dualChecked && !fromBanner)
+      ? { ui_fast_model: mdl }
+      : { main_model: mdl };
+
+    const saveRes = await api("/api/system/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(linkPayload),
+    });
+    if (saveRes.hardware) state.hardware = saveRes.hardware;
+    if (saveRes.ollama) state.ollamaStatus = saveRes.ollama;
+    else if (pullRes.ollama) state.ollamaStatus = pullRes.ollama;
+
+    showToast(
+      linkPayload.main_model
+        ? `Đã tải xong & tự kết nối Model chính ${mdl} ✓ Sẵn sàng dịch ngay!`
+        : `Đã tải xong & gắn Model UI nhanh ${mdl} ✓`
+    );
+    await refreshHealth();
+    if (!$("modalHardwareSettings")?.classList.contains("hidden")) {
+      await openHardwareModal();
+    }
+    const g = selectedGame();
+    if (g) refreshStudioMonitor(g.game_id);
   } catch (err) {
-    $("pullProgressText").textContent = `Lỗi: ${err.message}`;
+    if ($("pullProgressText")) $("pullProgressText").textContent = `Lỗi: ${err.message}`;
+    if ($("bannerPullProgressText")) $("bannerPullProgressText").textContent = `Lỗi: ${err.message}`;
     showToast(err.message, "error");
   } finally {
-    btn.disabled = false;
+    if (btnModal) btnModal.disabled = false;
+    if (btnBanner) btnBanner.disabled = false;
+    if ($("bannerPullProgressWrap")) $("bannerPullProgressWrap").classList.add("hidden");
   }
+}
+
+async function pullRecommendedModel() {
+  const mdl = ($("selectRecommendModel")?.value || "").trim();
+  await pullModelAndAutoLink(mdl, false);
 }
 
 async function saveHardwareSettings() {
@@ -2016,13 +2184,18 @@ function setupSSE() {
         updateLiveTelemetryUI(data.telemetry);
       }
       if (event === "ollama_pull_progress") {
-        if ($("pullProgressWrap")) $("pullProgressWrap").classList.remove("hidden");
         const pct = Number(data.pct || 0);
-        if ($("pullProgressBar")) $("pullProgressBar").style.width = `${Math.min(100, Math.max(2, pct))}%`;
-        if ($("pullProgressText")) {
-          $("pullProgressText").textContent = data.error
-            ? `Lỗi: ${data.error}`
-            : `${data.model || ""}: ${data.status || ""} (${pct.toFixed(1)}%)`;
+        const widthStr = `${Math.min(100, Math.max(2, pct))}%`;
+        const msgStr = data.error
+          ? `Lỗi: ${data.error}`
+          : `${data.model || ""}: ${data.status || ""} (${pct.toFixed(1)}%)`;
+        if ($("pullProgressWrap")) $("pullProgressWrap").classList.remove("hidden");
+        if ($("pullProgressBar")) $("pullProgressBar").style.width = widthStr;
+        if ($("pullProgressText")) $("pullProgressText").textContent = msgStr;
+        if ($("bannerPullProgressWrap") && !$("ollamaSetupBanner")?.classList.contains("hidden")) {
+          $("bannerPullProgressWrap").classList.remove("hidden");
+          if ($("bannerPullProgressBar")) $("bannerPullProgressBar").style.width = widthStr;
+          if ($("bannerPullProgressText")) $("bannerPullProgressText").textContent = msgStr;
         }
         return;
       }
@@ -2250,11 +2423,24 @@ function bindEvents() {
   $("btnReapplySub")?.addEventListener("click", () => reapplyGameSkill("sub_only"));
   $("btnReapplyAll")?.addEventListener("click", () => reapplyGameSkill("all_unlocked"));
 
-  // Topbar AI Model & Hardware Profiler modal triggers
+  // Topbar AI Model & Hardware Profiler modal triggers + 1-Click Onboarding Banner
   $("ollamaStatusPill")?.addEventListener("click", openHardwareModal);
   $("ollamaStatusPill")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openHardwareModal(); }
   });
+  $("btnDownloadOllama")?.addEventListener("click", openOllamaDownloadPage);
+  $("btnModalDownloadOllama")?.addEventListener("click", openOllamaDownloadPage);
+  $("btnLaunchOllama")?.addEventListener("click", (e) => launchOllamaFromUI(e.currentTarget));
+  $("btnModalLaunchOllama")?.addEventListener("click", (e) => launchOllamaFromUI(e.currentTarget));
+  $("btnRecheckOllama")?.addEventListener("click", async () => {
+    await refreshHealth();
+    showToast(state.ollamaStatus?.online ? "Ollama đã kết nối ✓" : "Vẫn chưa thấy Ollama chạy.");
+  });
+  $("btnQuickPullRecommended")?.addEventListener("click", (e) => {
+    const mdl = e.currentTarget?.dataset?.model || getBestRecommendedModelName(state.ollamaStatus, state.hardware);
+    pullModelAndAutoLink(mdl, true);
+  });
+  $("btnOpenHwFromBanner")?.addEventListener("click", openHardwareModal);
   $("btnCloseHwModal")?.addEventListener("click", () => $("modalHardwareSettings").classList.add("hidden"));
   $("btnConfigDualModels")?.addEventListener("click", openHardwareModal);
   $("chkDualModelQuick")?.addEventListener("change", (e) => toggleDualModel(e.target.checked));
