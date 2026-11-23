@@ -5,7 +5,28 @@
 
 **Black Sakura Translate** là ứng dụng Việt hóa / đa ngôn ngữ hóa game PC **hoàn toàn miễn phí, chạy 100% AI cục bộ (Local AI qua Ollama)** với giao diện phong cách **Steam Desktop** hiện đại. Không cần API trả phí, không gửi dữ liệu ra máy chủ ngoài, bảo vệ file game gốc bằng hệ thống an toàn 6 lớp.
 
-> **👉 Tải nhanh cho người dùng (không cần biết code):** Bấm nút **[TẢI APP NGAY (Release v1.0.0)](https://github.com/hohieu112007-byte/black-sakura-translate/releases/latest)** hoặc nhìn cột **Releases** bên phải trang GitHub -> tải file `.zip`, giải nén và chạy luôn!
+> **👉 Tải nhanh cho người dùng (không cần biết code):** Bấm nút **[TẢI APP NGAY (Release v1.0.0)](https://github.com/hohieu112007-byte/black-sakura-translate/releases/latest)** hoặc nhìn cột **Releases** bên phải trang GitHub -> tải **`Black-Sakura-Translate-v1.0.0-Windows-Standalone.zip`**, giải nén và nháy đúp **`BlackSakuraTranslate.exe`**!
+
+---
+
+## Ảnh chụp giao diện thực tế
+
+### 1. Màn hình Điều khiển Game & Dịch nhanh (Theme *Obsidian Đêm*)
+![Màn hình chính Black Sakura Translate](docs/screenshots/01-overview-obsidian.png)
+
+### 2. Bảng Dịch Trực Tiếp, Thay thế Hàng loạt & Từ điển Thuật ngữ
+![Bảng Dịch Trực Tiếp & Từ điển](docs/screenshots/02-live-editor.png)
+
+<details>
+<summary><b>📸 Xem thêm ảnh: Thư viện Ảnh bìa Steam & Kho Skill 2 Lớp (5 Giao diện màu)</b></summary>
+
+#### Thư viện Game phong cách Steam Poster 2:3
+![Thư viện Game Steam-style](docs/screenshots/04-library-obsidian.png)
+
+#### Kho Skill 2 Lớp & Quản lý Bộ công cụ GitHub (Theme *Sakuga Indigo*)
+![Kho Skill 2 Lớp](docs/screenshots/03-skill-hub-indigo.png)
+
+</details>
 
 ---
 
