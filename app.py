@@ -1531,8 +1531,9 @@ async def api_translate_start(req: StartTranslateRequest):
             )
         except Exception as exc:
             logger.exception("Translation pipeline failed for %s", req.game_id)
-            _job_states[req.game_id] = {"status": "error", "error": str(exc)}
-            emit_sse("error", {"game_id": req.game_id, "message": str(exc)})
+            err_msg = str(exc).strip() or f"{type(exc).__name__} (Ollama phản hồi quá thời gian hoặc mất kết nối)"
+            _job_states[req.game_id] = {"status": "error", "error": err_msg}
+            emit_sse("error", {"game_id": req.game_id, "message": err_msg})
         finally:
             library_db.clear_job_journal(req.game_id)
             try:

@@ -515,8 +515,9 @@ class QwenEngine:
         num_predict: int = 0,
         model_name: Optional[str] = None,
         num_ctx: Optional[int] = None,
+        stream_cb: Optional[Callable[[int, float], None]] = None,
     ) -> Tuple[str, str, int, float]:
-        """Call Ollama /api/chat respecting supports_thinking, locked num_ctx, and dynamic num_predict."""
+        """Call Ollama /api/chat respecting supports_thinking, locked num_ctx, dynamic num_predict, and optional streaming."""
         eff = self.profiler.get_effective_config() if hasattr(self.profiler, "get_effective_config") else self.profiler.get_effective_settings()
         model = model_name or eff["main_model"]
         ctx = int(num_ctx or eff["num_ctx"] or 2048)
@@ -534,9 +535,10 @@ class QwenEngine:
         }
 
         can_think = supports_thinking(model)
+        use_stream = stream_cb is not None
         payload: Dict[str, Any] = {
             "model": model,
-            "stream": False,
+            "stream": use_stream,
             "keep_alive": "10m",
             "options": opts,
             "messages": [
@@ -547,29 +549,88 @@ class QwenEngine:
         if can_think:
             payload["think"] = bool(think)
 
-        t0 = time.perf_counter()
-        resp = await client.post(f"{base_url}/api/chat", json=payload)
-        if resp.status_code == 400 and "think" in payload:
-            # Automatic fallback without `think` flag if Ollama rejects reasoning param for this tag
-            fallback_payload = dict(payload)
-            fallback_payload.pop("think", None)
-            fallback_payload["messages"] = [
+        def _fallback_payload(src: Dict[str, Any]) -> Dict[str, Any]:
+            fb = dict(src)
+            fb.pop("think", None)
+            fb["messages"] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
-            resp = await client.post(f"{base_url}/api/chat", json=fallback_payload)
-        resp.raise_for_status()
-        data = resp.json()
-        elapsed = max(0.05, time.perf_counter() - t0)
-        msg = data.get("message", {})
-        content = msg.get("content", "")
-        thinking = msg.get("thinking", "") or ""
-        if not thinking and "<think>" in content:
-            m = re.search(r"<think>(.*?)</think>", content, re.DOTALL | re.IGNORECASE)
-            if m:
-                thinking = m.group(1).strip()
-        eval_count = int(data.get("eval_count") or max(1, len(content) // 4))
-        return content, thinking, eval_count, elapsed
+            return fb
+
+        t0 = time.perf_counter()
+        if not use_stream:
+            resp = await client.post(f"{base_url}/api/chat", json=payload)
+            if resp.status_code == 400 and "think" in payload:
+                resp = await client.post(f"{base_url}/api/chat", json=_fallback_payload(payload))
+            resp.raise_for_status()
+            data = resp.json()
+            elapsed = max(0.05, time.perf_counter() - t0)
+            msg = data.get("message", {})
+            content = msg.get("content", "")
+            thinking = msg.get("thinking", "") or ""
+            if not thinking and "<think>" in content:
+                m = re.search(r"<think>(.*?)</think>", content, re.DOTALL | re.IGNORECASE)
+                if m:
+                    thinking = m.group(1).strip()
+            eval_count = int(data.get("eval_count") or max(1, len(content) // 4))
+            return content, thinking, eval_count, elapsed
+
+        async def _consume_stream(req_payload: Dict[str, Any]) -> Tuple[str, str, int, float]:
+            parts_c: List[str] = []
+            parts_t: List[str] = []
+            chunk_toks = 0
+            last_emit = time.perf_counter()
+            eval_cnt = 0
+            async with client.stream("POST", f"{base_url}/api/chat", json=req_payload) as sresp:
+                if sresp.status_code == 400 and "think" in req_payload:
+                    raise ValueError("FALLBACK_NO_THINK")
+                sresp.raise_for_status()
+                async for line in sresp.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except Exception:
+                        continue
+                    if chunk.get("error"):
+                        raise RuntimeError(str(chunk["error"]))
+                    msg_c = chunk.get("message") or {}
+                    dc = msg_c.get("content") or ""
+                    dt = msg_c.get("thinking") or ""
+                    if dc:
+                        parts_c.append(dc)
+                        chunk_toks += 1
+                    if dt:
+                        parts_t.append(dt)
+                        chunk_toks += 1
+                    if chunk.get("eval_count"):
+                        eval_cnt = int(chunk["eval_count"])
+                    now_t = time.perf_counter()
+                    if stream_cb and (now_t - last_emit >= 0.35 or chunk.get("done")):
+                        last_emit = now_t
+                        el = max(0.1, now_t - t0)
+                        cur_toks = max(eval_cnt, chunk_toks)
+                        try:
+                            stream_cb(cur_toks, round(cur_toks / el, 1))
+                        except Exception:
+                            pass
+            elapsed_s = max(0.05, time.perf_counter() - t0)
+            full_c = "".join(parts_c)
+            full_t = "".join(parts_t)
+            if not full_t and "<think>" in full_c:
+                m = re.search(r"<think>(.*?)</think>", full_c, re.DOTALL | re.IGNORECASE)
+                if m:
+                    full_t = m.group(1).strip()
+            final_toks = eval_cnt or max(chunk_toks, len(full_c) // 4, 1)
+            return full_c, full_t, final_toks, elapsed_s
+
+        try:
+            return await _consume_stream(payload)
+        except ValueError as exc:
+            if str(exc) == "FALLBACK_NO_THINK":
+                return await _consume_stream(_fallback_payload(payload))
+            raise
 
     async def pre_think_glossary(
         self,
@@ -585,13 +646,18 @@ class QwenEngine:
         style_skill_id: Optional[str] = None,
         lang_skill_override: str = "auto",
         model_name: Optional[str] = None,
+        use_deep_think: bool = False,
+        stream_cb: Optional[Callable[[int, float], None]] = None,
     ) -> List[Dict[str, str]]:
-        """Phase 0: Single Deep-Think pass over <= 35 sample lines to lock glossary & compress 4-line Style Card."""
+        """Phase 0: Fast pass over <= 18 concise sample lines to lock glossary & compress 4-line Style Card."""
         effective_style = style_skill_id or tone_preset or "natural_standard"
         if not sample_rows and not (game_description or "").strip() and effective_style in ("natural", "natural_standard"):
             return []
-        sample_subset = sample_rows[:35]
-        user_lines = "\n".join(f"{r.get('sample_key') or i}|{r['masked_text']}" for i, r in enumerate(sample_subset))
+        sample_subset = sample_rows[:18]
+        user_lines = "\n".join(
+            f"{r.get('sample_key') or i}|{(r['masked_text'] or '')[:160].replace(chr(10), ' ')}"
+            for i, r in enumerate(sample_subset)
+        )
         if not user_lines:
             user_lines = "0|Start Game\n1|Settings\n2|Continue"
         sys_prompt = build_glossary_system_prompt(
@@ -610,10 +676,11 @@ class QwenEngine:
             client,
             sys_prompt,
             user_lines,
-            think=True,
+            think=bool(use_deep_think),
             temperature=0.25,
-            num_predict=1400,
+            num_predict=850 if use_deep_think else 620,
             model_name=model_name,
+            stream_cb=stream_cb,
         )
         terms = parse_glossary_lines(content) or parse_glossary_lines(thinking)
         if terms:
@@ -998,20 +1065,63 @@ class QwenEngine:
                     if style_card_cb:
                         style_card_cb(card)
 
-                await self.pre_think_glossary(
-                    client,
-                    story_samples[:35],
-                    source_lang,
-                    target_lang,
-                    cache_db,
-                    emit_cb=emit_cb,
-                    game_description=game_description,
-                    tone_preset=tone_preset,
-                    style_card_cb=_on_style_card,
-                    style_skill_id=effective_style,
-                    lang_skill_override=lang_skill_override,
-                    model_name=main_model,
-                )
+                def _on_prethink_stream(toks: int, tps: float) -> None:
+                    if not emit_cb:
+                        return
+                    prog_now = cache_db.get_progress(source_lang, target_lang)
+                    emit_cb(
+                        "progress",
+                        {
+                            **prog_now,
+                            "phase": "PRETHINK",
+                            "phase_label": f"Pha 0 ({main_model}): Nén Style Card & lập Từ điển...",
+                            "active_model": main_model,
+                            "active_model_role": "PRETHINK",
+                            "dual_model_active": dual_enabled,
+                            "tm_hits": len(tm_updates),
+                            "tokens_done": toks,
+                            "tok_per_sec": tps,
+                            "telemetry": self.get_telemetry(),
+                        },
+                    )
+
+                try:
+                    await asyncio.wait_for(
+                        self.pre_think_glossary(
+                            client,
+                            story_samples[:18],
+                            source_lang,
+                            target_lang,
+                            cache_db,
+                            emit_cb=emit_cb,
+                            game_description=game_description,
+                            tone_preset=tone_preset,
+                            style_card_cb=_on_style_card,
+                            style_skill_id=effective_style,
+                            lang_skill_override=lang_skill_override,
+                            model_name=main_model,
+                            use_deep_think=(ai_mode == "DEEP_THINK"),
+                            stream_cb=_on_prethink_stream,
+                        ),
+                        timeout=65.0,
+                    )
+                except Exception as exc:
+                    err_desc = str(exc).strip() or type(exc).__name__
+                    logger.warning("Phase 0 pre-think skipped after fallback guard (%s); continuing with fallback style card.", err_desc)
+                    if not active_style_card:
+                        fallback_card = build_fallback_style_card(tone_preset, game_description)
+                        if fallback_card:
+                            _on_style_card(fallback_card)
+                    if emit_cb:
+                        emit_cb(
+                            "prethink_done",
+                            {
+                                "thinking": f"Pha 0 chuyển sang chế độ nhanh ({err_desc}) — đã tự dùng Style Card mặc định để vào dịch ngay.",
+                                "terms": cache_db.list_glossary_terms(source_lang, target_lang),
+                                "style_card": active_style_card,
+                                "tok_per_sec": 0.0,
+                            },
+                        )
 
             # Step C: Length Bucketing (Short UI / <=6 words vs Story/Dialogue) -> KV Prefix Cache optimization
             def _is_short_ui(row: Dict[str, Any]) -> bool:
