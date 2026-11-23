@@ -115,6 +115,11 @@ _tray_balloon_shown: bool = False
 _instance_mutex_handle: Optional[int] = None
 
 _APP_TITLE = "Black Sakura Translate"
+_APP_VERSION = "1.0.0"
+_GITHUB_REPO = "hohieu112007-byte/black-sakura-translate"
+_GITHUB_RELEASES_API = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
+_GITHUB_RELEASES_PAGE = f"https://github.com/{_GITHUB_REPO}/releases"
+_UPDATE_CHECK_TTL_SEC = 12 * 3600
 _APP_IDENTITY = "sakuga_localization_launcher"
 _SINGLE_INSTANCE_MUTEX_NAME = "Local\\SakugaLocalizationLauncher_SingleInstance_v1"
 _INSTANCE_LOCK_PATH = APP_DIR / ".instance_lock.json"
@@ -329,6 +334,10 @@ class UiLangRequest(BaseModel):
     lang: str = "vi"
 
 
+class AutoUpdateSettingRequest(BaseModel):
+    enabled: bool = True
+
+
 class MinimizeTrayRequest(BaseModel):
     enabled: bool = True
 
@@ -443,6 +452,8 @@ async def api_health():
         "tools": tool_boot.get_status(),
         "tm_stats": global_tm.stats(),
         "supported_langs": QWEN35_SUPPORTED_LANGS,
+        "app_version": _APP_VERSION,
+        "auto_check_updates": library_db.get_setting("auto_check_updates", "1") == "1",
         "ui_theme": library_db.get_setting("ui_theme", "mono-ink"),
         "ui_lang": library_db.get_setting("ui_lang", "vi"),
         "minimize_to_tray": library_db.get_setting("minimize_to_tray", "1") == "1",
@@ -468,6 +479,143 @@ async def api_save_ui_lang(req: UiLangRequest):
 async def api_save_minimize_to_tray(req: MinimizeTrayRequest):
     library_db.set_setting("minimize_to_tray", "1" if req.enabled else "0")
     return {"ok": True, "enabled": bool(req.enabled)}
+
+
+def _parse_version_tuple(raw: str) -> tuple[int, ...]:
+    """Extract numeric version tuple like (1, 0, 1) from tags such as 'v1.0.1'."""
+    m = re.match(r"^\s*v?(\d+(?:\.\d+)*)", str(raw or ""), re.IGNORECASE)
+    if not m:
+        return (0,)
+    return tuple(int(part) for part in m.group(1).split("."))
+
+
+def _is_newer_version(remote_tag: str, current_ver: str) -> bool:
+    r_parts = list(_parse_version_tuple(remote_tag))
+    c_parts = list(_parse_version_tuple(current_ver))
+    max_len = max(len(r_parts), len(c_parts))
+    r_parts.extend([0] * (max_len - len(r_parts)))
+    c_parts.extend([0] * (max_len - len(c_parts)))
+    return tuple(r_parts) > tuple(c_parts)
+
+
+def _sanitize_release_url(url: Optional[str]) -> str:
+    candidate = str(url or "").strip()
+    allowed_prefix = f"https://github.com/{_GITHUB_REPO}/releases"
+    if candidate.startswith(allowed_prefix):
+        return candidate
+    return _GITHUB_RELEASES_PAGE
+
+
+@app.get("/api/app/update-check")
+async def api_app_update_check(force: bool = False):
+    auto_enabled = library_db.get_setting("auto_check_updates", "1") == "1"
+    now = int(time.time())
+    cached_raw = library_db.get_setting("app_update_cache", "")
+    cached_data: Optional[Dict[str, Any]] = None
+    if cached_raw:
+        try:
+            parsed = json.loads(cached_raw)
+            if isinstance(parsed, dict):
+                cached_data = parsed
+        except Exception:
+            cached_data = None
+
+    if not force:
+        if cached_data and (now - int(cached_data.get("checked_at", 0))) < _UPDATE_CHECK_TTL_SEC:
+            latest_tag = str(cached_data.get("latest_tag") or _APP_VERSION)
+            return {
+                **cached_data,
+                "ok": True,
+                "current_version": _APP_VERSION,
+                "update_available": _is_newer_version(latest_tag, _APP_VERSION),
+                "release_url": _sanitize_release_url(cached_data.get("release_url")),
+                "auto_check_updates": auto_enabled,
+                "cached": True,
+            }
+        if not auto_enabled:
+            return {
+                "ok": True,
+                "skipped": True,
+                "current_version": _APP_VERSION,
+                "latest_version": _APP_VERSION,
+                "latest_tag": f"v{_APP_VERSION}",
+                "update_available": False,
+                "release_name": "",
+                "release_notes": "",
+                "release_url": _GITHUB_RELEASES_PAGE,
+                "published_at": "",
+                "checked_at": int(cached_data.get("checked_at", 0)) if cached_data else 0,
+                "auto_check_updates": False,
+                "cached": True,
+            }
+
+    try:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"BlackSakuraTranslate/{_APP_VERSION}",
+        }
+        async with httpx.AsyncClient(timeout=4.5, follow_redirects=False) as client:
+            resp = await client.get(_GITHUB_RELEASES_API, headers=headers)
+        if resp.status_code != 200:
+            raise RuntimeError(f"GitHub API HTTP {resp.status_code}")
+        payload = resp.json()
+        latest_tag = str(payload.get("tag_name") or f"v{_APP_VERSION}").strip()
+        latest_ver = latest_tag.lstrip("vV") or _APP_VERSION
+        notes = str(payload.get("body") or "").strip()
+        if len(notes) > 1200:
+            notes = notes[:1200].rstrip() + "..."
+        result = {
+            "ok": True,
+            "current_version": _APP_VERSION,
+            "latest_version": latest_ver,
+            "latest_tag": latest_tag,
+            "update_available": _is_newer_version(latest_tag, _APP_VERSION),
+            "release_name": str(payload.get("name") or latest_tag).strip(),
+            "release_notes": notes,
+            "release_url": _sanitize_release_url(payload.get("html_url")),
+            "published_at": str(payload.get("published_at") or "").strip(),
+            "checked_at": now,
+            "auto_check_updates": auto_enabled,
+            "cached": False,
+            "error": None,
+        }
+        library_db.set_setting("app_update_cache", json.dumps(result, ensure_ascii=False))
+        return result
+    except Exception as exc:
+        logger.debug("App update check failed/offline: %s", exc)
+        return {
+            "ok": False,
+            "current_version": _APP_VERSION,
+            "latest_version": _APP_VERSION,
+            "latest_tag": f"v{_APP_VERSION}",
+            "update_available": False,
+            "release_name": "",
+            "release_notes": "",
+            "release_url": _GITHUB_RELEASES_PAGE,
+            "published_at": "",
+            "checked_at": now,
+            "auto_check_updates": auto_enabled,
+            "cached": False,
+            "error": str(exc),
+        }
+
+
+@app.post("/api/app/update-settings")
+async def api_save_update_settings(req: AutoUpdateSettingRequest):
+    library_db.set_setting("auto_check_updates", "1" if req.enabled else "0")
+    return {"ok": True, "auto_check_updates": bool(req.enabled)}
+
+
+@app.post("/api/app/open-release")
+async def api_open_release_page(url: Optional[str] = None):
+    import webbrowser
+
+    safe_url = _sanitize_release_url(url)
+    try:
+        webbrowser.open(safe_url)
+        return {"ok": True, "url": safe_url}
+    except Exception as exc:
+        return {"ok": False, "url": safe_url, "message": str(exc)}
 
 
 @app.post("/api/ui/hide-to-tray")

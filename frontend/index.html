@@ -46,6 +46,10 @@
     </div>
 
     <div class="topbar-right">
+      <button id="appUpdatePill" type="button" class="update-pill hidden" title="Có phiên bản mới trên GitHub — Bấm để xem chi tiết" data-i18n-title="update_pill_title">
+        <span class="dot dot-gold"></span>
+        <span id="appUpdatePillText">⬆ Update</span>
+      </button>
       <div id="ollamaStatusPill" class="status-pill clickable-pill" role="button" tabindex="0" title="Bấm để chọn Model AI Local &amp; cấu hình phần cứng (Ollama)" data-i18n-title="ollama_pill_title">
         <span class="dot dot-muted" id="ollamaStatusDot"></span>
         <span id="ollamaStatusText">Ollama...</span>
@@ -647,6 +651,27 @@
           <div class="panel-card">
             <div class="card-header">
               <div>
+                <h2 data-i18n="app_update_card_title">Cập nhật Ứng dụng (GitHub Releases)</h2>
+                <p id="appUpdateStatusText" class="mono-sub" data-i18n="app_update_status_idle">Phiên bản hiện tại: v1.0.0</p>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span id="appVersionBadge" class="badge">v1.0.0</span>
+                <button id="btnCheckAppUpdate" type="button" class="btn btn-outline btn-sm" data-i18n="btn_check_update">↻ Kiểm tra bản mới</button>
+                <button id="btnOpenUpdateModal" type="button" class="btn btn-primary btn-sm hidden" data-i18n="btn_view_update">⬆ Xem bản mới</button>
+              </div>
+            </div>
+            <div class="settings-row" style="padding-bottom:2px;">
+              <div>
+                <strong data-i18n="auto_update_lbl">Tự động kiểm tra bản cập nhật khi mở app</strong>
+                <div class="mono-mini" data-i18n="auto_update_desc">Chỉ đọc phiên bản mới nhất trên GitHub Releases (12 giờ/lần), không gửi bất kỳ dữ liệu máy nào.</div>
+              </div>
+              <sakuga-toggle id="chkAutoUpdateCheck" label="Tự kiểm tra cập nhật" checked></sakuga-toggle>
+            </div>
+          </div>
+
+          <div class="panel-card">
+            <div class="card-header">
+              <div>
                 <h2 data-i18n="tm_title">Global Translation Memory (0ms Hit)</h2>
                 <p class="mono-sub">Global TM (<span id="tmTotalCount">0</span>)</p>
               </div>
@@ -903,6 +928,35 @@
 
         <div class="modal-actions">
           <sakuga-button id="btnSaveSkill" data-i18n="btn_save_skill">💾 Lưu vào Kho Skill</sakuga-button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: GitHub Release Update Notifier -->
+  <div id="modalAppUpdate" class="modal hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-head">
+        <h3 data-i18n="modal_update_title">⬆ CÓ PHIÊN BẢN MỚI TRÊN GITHUB</h3>
+        <button id="btnCloseUpdateModal" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="app-update-ver-row">
+          <span class="badge" id="lblUpdateCurrentVer">v1.0.0</span>
+          <span>➔</span>
+          <span class="badge badge-safe" id="lblUpdateLatestVer">v1.0.0</span>
+          <span id="lblUpdateReleaseDate" class="mono-mini"></span>
+        </div>
+        <div class="field-group">
+          <label data-i18n="lbl_update_notes">Nội dung thay đổi (Release Notes)</label>
+          <pre id="appUpdateNotesBox" class="app-update-notes"></pre>
+        </div>
+        <div class="slot-guide-box" data-i18n="update_preserve_hint">
+          💡 Mẹo giữ dữ liệu: Khi tải file ZIP mới về giải nén, hãy giữ lại hoặc chép đè cẩn thận để giữ nguyên thư mục backups/, cache/ và file library.db, global_tm.db của bạn.
+        </div>
+        <div class="modal-actions modal-actions-end">
+          <button id="btnDismissUpdateModal" type="button" class="btn btn-ghost btn-sm" data-i18n="btn_later">Để sau</button>
+          <sakuga-button id="btnOpenGitHubRelease" data-i18n="btn_open_release">⬇ Mở trang tải GitHub</sakuga-button>
         </div>
       </div>
     </div>

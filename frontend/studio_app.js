@@ -37,6 +37,9 @@ const state = {
   skills: { languages: [], styles: [] },
   skillCatalogLayer: "styles",
   editingSkill: null,
+  appVersion: "1.0.0",
+  autoCheckUpdates: true,
+  appUpdateInfo: null,
 };
 
 const DEFAULT_QWEN_SUPPORTED_LANGS = [
@@ -199,6 +202,7 @@ function applyUiLanguage(langCode, elForBurst = null, persistToServer = false) {
   }
   if (selectedGame()) renderSelectedGamePage();
   if (state.view === "tools") renderSkillsCatalog();
+  renderAppUpdateUI();
 
   if (elForBurst) {
     fireSakugaVfx(elForBurst, "tap");
@@ -513,7 +517,133 @@ async function refreshHealth() {
     if (typeof data.minimize_to_tray === "boolean" && $("chkMinimizeToTray")) {
       $("chkMinimizeToTray").checked = data.minimize_to_tray;
     }
+    if (data.app_version) {
+      state.appVersion = data.app_version;
+    }
+    if (typeof data.auto_check_updates === "boolean") {
+      state.autoCheckUpdates = data.auto_check_updates;
+      if ($("chkAutoUpdateCheck") && $("chkAutoUpdateCheck").checked !== data.auto_check_updates) {
+        $("chkAutoUpdateCheck").checked = data.auto_check_updates;
+      }
+    }
+    renderAppUpdateUI();
   } catch (_) {}
+}
+
+function renderAppUpdateUI() {
+  const isEn = state.uiLang === "en";
+  const curVer = state.appVersion || "1.0.0";
+  const info = state.appUpdateInfo;
+  const pill = $("appUpdatePill");
+  const pillTxt = $("appUpdatePillText");
+  const badge = $("appVersionBadge");
+  const statusEl = $("appUpdateStatusText");
+  const btnView = $("btnOpenUpdateModal");
+
+  if (badge) badge.textContent = `v${curVer}`;
+
+  if (info && info.update_available) {
+    const tag = info.latest_tag || `v${info.latest_version || curVer}`;
+    if (pill) pill.classList.remove("hidden");
+    if (pillTxt) pillTxt.textContent = isEn ? `⬆ ${tag} New` : `⬆ Có ${tag}`;
+    if (btnView) btnView.classList.remove("hidden");
+    if (statusEl) {
+      statusEl.textContent = isEn
+        ? `Update available: v${curVer} ➔ ${tag} (click to view release notes)`
+        : `Đã có bản mới: v${curVer} ➔ ${tag} (bấm để xem chi tiết & tải về)`;
+    }
+  } else {
+    if (pill) pill.classList.add("hidden");
+    if (btnView) btnView.classList.add("hidden");
+    if (statusEl) {
+      if (info && info.ok && !info.skipped) {
+        statusEl.textContent = isEn
+          ? `Up to date (v${curVer}) • Latest on GitHub: ${info.latest_tag || "v" + curVer}`
+          : `Đang dùng bản mới nhất (v${curVer}) • Bản mới nhất trên GitHub: ${info.latest_tag || "v" + curVer}`;
+      } else if (info && info.error) {
+        statusEl.textContent = isEn
+          ? `Current version: v${curVer} • Offline or unable to reach GitHub`
+          : `Phiên bản hiện tại: v${curVer} • Không có mạng hoặc chưa kết nối được GitHub`;
+      } else {
+        statusEl.textContent = isEn
+          ? `Current version: v${curVer}`
+          : `Phiên bản hiện tại: v${curVer}`;
+      }
+    }
+  }
+}
+
+function openAppUpdateModal() {
+  const info = state.appUpdateInfo;
+  const curVer = state.appVersion || "1.0.0";
+  const isEn = state.uiLang === "en";
+  if ($("lblUpdateCurrentVer")) $("lblUpdateCurrentVer").textContent = `v${curVer}`;
+  if ($("lblUpdateLatestVer")) $("lblUpdateLatestVer").textContent = info?.latest_tag || `v${info?.latest_version || curVer}`;
+  if ($("lblUpdateReleaseDate")) {
+    const pub = (info?.published_at || "").slice(0, 10);
+    $("lblUpdateReleaseDate").textContent = pub ? (isEn ? `Published: ${pub}` : `Phát hành: ${pub}`) : "";
+  }
+  if ($("appUpdateNotesBox")) {
+    $("appUpdateNotesBox").textContent = (info?.release_notes || "").trim() || (isEn ? "No release notes provided." : "Không có mô tả chi tiết cho phiên bản này.");
+  }
+  $("modalAppUpdate")?.classList.remove("hidden");
+}
+
+async function openAppReleasePage() {
+  const targetUrl = state.appUpdateInfo?.release_url || "";
+  try {
+    const q = targetUrl ? `?url=${encodeURIComponent(targetUrl)}` : "";
+    await api(`/api/app/open-release${q}`, { method: "POST" });
+    showToast(state.uiLang === "en" ? "Opened GitHub Releases in your browser!" : "Đã mở trang GitHub Releases trên trình duyệt!");
+  } catch (_) {
+    window.open(targetUrl || "https://github.com/hohieu112007-byte/black-sakura-translate/releases", "_blank");
+  }
+}
+
+async function checkAppUpdate(force = false) {
+  const btn = $("btnCheckAppUpdate");
+  if (btn && force) btn.disabled = true;
+  try {
+    const data = await api(`/api/app/update-check?force=${force ? "true" : "false"}`);
+    state.appUpdateInfo = data;
+    if (data.current_version) state.appVersion = data.current_version;
+    renderAppUpdateUI();
+    if (force) {
+      const isEn = state.uiLang === "en";
+      if (data.update_available) {
+        openAppUpdateModal();
+      } else if (data.ok) {
+        showToast(isEn ? `You are on the latest version (v${state.appVersion}) ✓` : `Bạn đang dùng bản mới nhất (v${state.appVersion}) ✓`);
+      } else {
+        showToast(isEn ? "Could not check GitHub right now (offline/timeout)." : "Chưa kết nối được GitHub để kiểm tra cập nhật.", "error");
+      }
+    }
+  } catch (_) {
+    if (force) {
+      showToast(state.uiLang === "en" ? "Failed to check for updates." : "Lỗi kiểm tra cập nhật.", "error");
+    }
+  } finally {
+    if (btn && force) btn.disabled = false;
+  }
+}
+
+async function toggleAutoUpdateCheck(enabled) {
+  const val = Boolean(enabled);
+  state.autoCheckUpdates = val;
+  try {
+    await api("/api/app/update-settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: val }),
+    });
+    showToast(
+      val
+        ? (state.uiLang === "en" ? "Auto update check enabled ✓" : "Đã bật tự kiểm tra bản cập nhật ✓")
+        : (state.uiLang === "en" ? "Auto update check disabled" : "Đã tắt tự kiểm tra bản cập nhật")
+    );
+  } catch (err) {
+    showToast(err.message, "error");
+  }
 }
 
 function getBestRecommendedModelName(ol, hw) {
@@ -2695,6 +2825,16 @@ function bindEvents() {
     $("btnUpdateTools")?.done?.();
     showToast("Đang cập nhật Tools...");
   });
+  $("appUpdatePill")?.addEventListener("click", openAppUpdateModal);
+  $("btnCheckAppUpdate")?.addEventListener("click", () => checkAppUpdate(true));
+  $("btnOpenUpdateModal")?.addEventListener("click", openAppUpdateModal);
+  $("btnCloseUpdateModal")?.addEventListener("click", () => $("modalAppUpdate")?.classList.add("hidden"));
+  $("btnDismissUpdateModal")?.addEventListener("click", () => $("modalAppUpdate")?.classList.add("hidden"));
+  $("btnOpenGitHubRelease")?.addEventListener("click", () => {
+    openAppReleasePage();
+    $("btnOpenGitHubRelease")?.done?.();
+  });
+  $("chkAutoUpdateCheck")?.addEventListener("change", (e) => toggleAutoUpdateCheck(e.target.checked));
   $("tmSearchInput").addEventListener("input", () => loadToolsAndTM());
 }
 
@@ -2705,5 +2845,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupDragDropOverlay();
   setupSSE();
   await Promise.all([refreshHealth(), loadGames(), loadSkillsCatalog()]);
+  setTimeout(() => checkAppUpdate(false), 1800);
   setInterval(refreshHealth, 8000);
 });
