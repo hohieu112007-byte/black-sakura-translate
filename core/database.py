@@ -25,10 +25,9 @@ def sha1_text(text: str) -> str:
 _ALLOWED_GAME_COLUMNS = {
     "title", "game_dir", "exe_path", "steam_appid", "launch_mode", "shortcut_path",
     "cover_path", "game_description", "compiled_style_card", "tone_preset",
-    "style_skill_id", "lang_skill_override", "engine", "method",
+    "style_skill_id", "lang_skill_override", "applied_skill_signature", "engine", "method",
     "anticheat_status", "anticheat_vendors", "anticheat_files", "detected_slots_json",
-    "source_lang", "target_lang", "inject_slot", "preset_level", "scope", "ai_mode",
-    "translate_choices", "keep_proper_nouns", "patch_fonts", "total_strings",
+    "source_lang", "target_lang", "inject_slot", "scope", "total_strings",
     "translated_strings", "progress_pct", "is_patched", "last_played_at", "updated_at",
 }
 
