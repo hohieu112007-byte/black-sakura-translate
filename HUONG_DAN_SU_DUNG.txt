@@ -1,0 +1,159 @@
+================================================================================
+                        BLACK SAKURA TRANSLATE
+             HƯỚNG DẪN SỬ DỤNG CHI TIẾT (PHIÊN BẢN MÃ NGUỒN MỞ)
+================================================================================
+
+Black Sakura Translate là ứng dụng hỗ trợ Việt hóa và dịch đa ngôn ngữ cho game
+PC chạy 100% bằng AI cục bộ (Ollama Local AI), hoàn toàn miễn phí, không cần
+API trả phí, và bảo vệ file game gốc bằng Hệ thống An toàn 6 Lớp.
+
+--------------------------------------------------------------------------------
+PHẦN 1: YÊU CẦU HỆ THỐNG & CÀI ĐẶT LẦN ĐẦU
+--------------------------------------------------------------------------------
+1. Hệ điều hành: Windows 10 / 11 (64-bit).
+2. Cài Python 3.10 trở lên:
+   - Tải tại: https://www.python.org/downloads/
+   - QUAN TRỌNG: Khi cài đặt, nhớ tích chọn "Add Python to PATH".
+3. Cài Ollama (chạy AI Local ngay trên máy):
+   - Tải tại: https://ollama.com/
+   - Cài xong, mở Ollama (kiểm tra có biểu tượng Ollama ở khay hệ thống).
+   - Mở Terminal / CMD và tải model khuyên dùng:
+       ollama pull qwen3.5:4b
+   - (Tùy chọn — nếu muốn bật Dual-Model tăng tốc UI):
+       ollama pull qwen3:1.7b
+   - Mẹo: Bạn cũng có thể tải model trực tiếp ngay bên trong app (bấm vào ô
+     trạng thái Ollama ở góc trên bên phải -> chọn Model -> bấm "Tải Model").
+
+--------------------------------------------------------------------------------
+PHẦN 2: KHỞI ĐỘNG ỨNG DỤNG
+--------------------------------------------------------------------------------
+- Cách 1 (Nhanh nhất): Nháy đúp file "Start_Black_Sakura_Translate.bat".
+  Lần đầu chạy, script sẽ tự kiểm tra và cài đặt các thư viện trong
+  requirements.txt nếu máy bạn chưa có, sau đó mở cửa sổ Black Sakura Translate.
+
+- Cách 2 (Chạy bằng dòng lệnh):
+    pip install -r requirements.txt
+    python app.py
+
+- Cách 3 (Mở trên trình duyệt Web nếu máy không hỗ trợ WebView2):
+    python app.py --web
+
+Lưu ý:
+- App chỉ mở 1 cửa sổ duy nhất (Single-Instance). Nếu bạn bấm mở lại khi app
+  đang chạy ngầm ở khay hệ thống, cửa sổ cũ sẽ tự động hiện lên.
+- Lần đầu mở app, hệ thống sẽ tự tải các công cụ mã nguồn mở hỗ trợ
+  (repak, UnrealLocres, rpatool, font Tiếng Việt) vào thư mục tools/.
+
+--------------------------------------------------------------------------------
+PHẦN 3: QUY TRÌNH VIỆT HÓA MỘT GAME (5 BƯỚC CƠ BẢN)
+--------------------------------------------------------------------------------
+BƯỚC 1: THÊM GAME VÀO THƯ VIỆN
+  - Bấm nút "+" ở góc trên bên trái (hoặc "Quét Steam Library" ở góc dưới trái)
+    để tự động quét toàn bộ game Steam trên máy.
+  - Hoặc kéo thả trực tiếp thư mục game / file .exe / shortcut (.url, .lnk)
+    vào cửa sổ ứng dụng.
+  - App sẽ tự nhận diện Engine (Unity, Unreal, Ren'Py, JSON/CSV/PO/YAML...),
+    tải ảnh bìa và kiểm tra Anti-Cheat.
+    (Cảnh báo: Game online có Anti-Cheat sẽ tự động bị khóa chỉnh sửa file để
+    bảo vệ tài khoản của bạn.)
+
+BƯỚC 2: CHỌN NGÔN NGỮ & SLOT CHÈN AN TOÀN (Tab "Cơ bản (Dịch nhanh)")
+  - Ngôn ngữ gốc trong game: Chọn ngôn ngữ nguồn bạn muốn dịch từ đó
+    (VD: English [en] hoặc Français [fr]).
+  - Ngôn ngữ dịch ra: Chọn "Tiếng Việt (Vietnamese)" (hoặc ngôn ngữ khác).
+  - Slot chèn đề xuất: App tự động chọn slot tối ưu nhất (thường là một ngôn
+    ngữ Latin ít dùng như Polski / Français / Español để giữ nguyên Tiếng Anh
+    gốc). Khi vào game, bạn chọn ngôn ngữ tương ứng với Slot đó (với game Unity
+    hỗ trợ đổi nhãn, tên slot sẽ tự đổi thành "Tiếng Việt").
+
+BƯỚC 3: CHỌN MỨC ĐỘ DỊCH & VĂN PHONG
+  - Cấp 1 (Siêu Tốc): Flash không suy luận, nhanh nhất, phù hợp game ít thoại.
+  - Cấp 2 (Cân Bằng — Khuyên dùng): Chốt Từ điển Thuật ngữ 1 lần ở Pha 0 +
+    dịch ổn định, văn phong tự nhiên.
+  - Cấp 3 (Cốt Truyện Sâu): Suy luận sâu (Deep-Think) cho game nặng cốt truyện.
+  - Hộp "Skill & Văn phong": Bấm vào để mở rộng, chọn Cầu ngôn ngữ (Lớp 1) và
+    Bộ văn phong (Lớp 2) theo thể loại game (Kinh dị, Khoa học viễn tưởng,
+    Kiếm hiệp, Visual Novel, Co-op...). Có thể dán thêm bối cảnh/xưng hô riêng.
+
+BƯỚC 4: DỊCH & THEO DÕI TIẾN ĐỘ
+  - Bấm nút "DỊCH NGAY" trên thanh hành động.
+  - Có thể bấm "Tạm dừng" bất cứ lúc nào hoặc bấm "Ẩn khay" để chạy ngầm dưới
+    khay hệ thống. Mọi câu đã dịch được lưu tức thì vào SQLite.
+  - Khi xong 100%, app tự chèn bản dịch vào game và vá Font Tiếng Việt.
+  - Bấm "CHƠI NGAY" để vào game trải nghiệm.
+
+BƯỚC 5: KIỂM TRA & FIX LỖI SAU DỊCH (NẾU CẦN)
+  - Nếu vào game thấy sót từ ngoại ngữ, dính thẻ ký tự lạ hoặc bị ô vuông chữ:
+    Bấm nút "Fix lỗi" trên thanh hành động. App sẽ tự quét các câu bất thường,
+    dịch lại bằng AI QA, đồng bộ catalog.bin/catalog.json (Unity) và vá Font.
+
+--------------------------------------------------------------------------------
+PHẦN 4: CÁC TÍNH NĂNG NÂNG CAO
+--------------------------------------------------------------------------------
+1. DUAL-MODEL TĂNG TỐC (Không giảm chất lượng hội thoại):
+   - Bật công tắc "Dual-Model" ngay tại tab Cơ bản (hoặc cửa sổ Model AI).
+   - App dùng Model nhẹ (VD: qwen3:1.7b) quét nhanh các nhãn UI/Menu ngắn, sau
+     đó tự xả sạch VRAM và nạp 100% VRAM cho Model chính (VD: qwen3.5:4b) dịch
+     Cốt truyện & Hội thoại.
+
+2. CHẾ ĐỘ ÊM ÁI CHO LAPTOP / USB AUDIO-SAFE:
+   - Bấm vào ô trạng thái Ollama ở góc trên bên phải -> bật "Chế độ Êm ái cho
+     Laptop (Giảm nóng & chống nhiễu tai nghe USB)".
+   - Giới hạn tối đa 2 luồng song song và thêm nhịp nghỉ 65ms giữa các gói dịch
+     giúp giảm nhiệt độ quạt và tránh giật nguồn / ngắt kết nối tai nghe USB.
+
+3. SỬA TAY TRỰC TIẾP, THAY THẾ HÀNG LOẠT & GHI NÓNG (Tab "Bảng Dịch & Từ điển"):
+   - Gõ từ khóa để tìm trong TOÀN BỘ cơ sở dữ liệu của game, lọc theo nhóm:
+     Tất cả / Đã sửa tay / Cốt truyện / Giao diện UI / Chưa dịch & Lỗi.
+   - Bấm trực tiếp vào từng dòng để sửa câu dịch -> bấm Enter để lưu (câu đã
+     sửa tay sẽ được khóa an toàn, không bị AI ghi đè).
+   - Bấm "Thay thế hàng loạt" để đổi đồng loạt tên nhân vật / thuật ngữ trên
+     toàn bộ game (tự động bảo vệ các thẻ code và biến số).
+   - Bấm "Ghi nóng" để áp dụng ngay các bản sửa vào file game trong vài giây.
+
+4. CHIA SẺ BẢN DỊCH 1-CLICK (.sakugapack) & KHO BẢN DỊCH:
+   - Mở tab "Kho bản dịch & An toàn":
+     + Quản lý tất cả các cặp ngôn ngữ đã dịch của game (chuyển qua lại ngay
+       không cần dịch lại).
+     + Bấm "Xuất .sakugapack" để đóng gói bản dịch + từ điển thành 1 file gửi
+       cho bạn bè.
+     + Bạn bè chỉ cần bấm "Nhập .sakugapack (1-Click)" để cài ngay vào game.
+
+5. TỰ ĐỘNG PHÁT HIỆN GAME CẬP NHẬT TRÊN STEAM (DELTA UPDATE):
+   - Khi Steam cập nhật game hoặc bạn bấm Verify Game Files, app sẽ hiện thông
+     báo ở đầu trang game.
+   - Bấm "Áp dụng lại & Dịch câu mới": App giữ toàn bộ câu đã dịch trước đó và
+     chỉ trích xuất/dịch bổ sung các câu mới trong bản cập nhật.
+
+6. KHÔI PHỤC FILE GỐC 100%:
+   - Bấm "Khôi phục gốc" bất cứ lúc nào để trả 100% file game về nguyên bản
+     (kiểm chứng bằng mã SHA-256). Bản dịch trong SQLite vẫn được lưu an toàn
+     tại "Kho bản dịch" để cài lại bất cứ khi nào cần.
+
+--------------------------------------------------------------------------------
+PHẦN 5: XỬ LÝ MỘT SỐ LỖI THƯỜNG GẶP (FAQ)
+--------------------------------------------------------------------------------
+- Báo lỗi "Ollama chưa kết nối / Offline":
+  -> Mở ứng dụng Ollama trên Windows (hoặc chạy lệnh "ollama serve"), đợi vài
+     giây rồi bấm vào ô trạng thái Ollama ở góc trên bên phải.
+
+- Chữ Tiếng Việt trong game bị mất dấu / ô vuông / lệch cỡ chữ:
+  -> Vào tab "Cài đặt đầy đủ", đảm bảo đã bật "Vá Font Tiếng Việt", sau đó bấm
+     "Fix lỗi" (hoặc "Vá Font nếu bị ô vuông").
+
+- Game Steam bị đen màn hình sau khi cài bản dịch (game Unity):
+  -> Bấm "Fix lỗi" để app đồng bộ lại CRC & kích thước file trong catalog.bin /
+     catalog.json của Unity Addressables.
+
+- Lỡ bấm X đóng cửa sổ lúc đang dịch:
+  -> Mặc định app thu gọn xuống khay hệ thống (System Tray) và vẫn tiếp tục
+     chạy ngầm. Nháy đúp vào icon dưới khay Windows để mở lại. Muốn thoát hẳn:
+     Chuột phải vào icon ở khay -> chọn "Thoát hẳn Black Sakura Translate".
+
+- Laptop bị nóng / quạt kêu lớn hoặc rớt kết nối tai nghe USB khi dịch:
+  -> Bấm vào ô Ollama ở góc trên bên phải -> tích chọn "Chế độ Êm ái cho
+     Laptop" -> bấm "Lưu cấu hình AI".
+
+================================================================================
+Chúc bạn có những trải nghiệm chơi game tuyệt vời cùng Black Sakura Translate!
+================================================================================

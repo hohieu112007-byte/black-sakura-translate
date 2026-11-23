@@ -1,0 +1,2566 @@
+"""Black Sakura Translate — FastAPI Backend, SSE Live Stream & PyWebView Desktop Window."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import gc
+import io
+import json
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import zipfile
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
+
+import httpx
+import uvicorn
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+APP_DIR = Path(__file__).resolve().parent
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+
+from core.atomic_io import atomic_write_text, cleanup_orphaned_temps
+from core.database import GameCacheDB, GlobalTMDB, LibraryDB
+from core.hardware_profiler import HardwareProfiler
+from core.win_tray import WinSystemTray
+from core.game_launcher import (
+    COVERS_DIR,
+    collect_steam_apps,
+    download_steam_cover,
+    fetch_steam_app_context,
+    ingest_game_input,
+    launch_game_safely,
+)
+from core.prompts import (
+    QWEN35_SUPPORTED_LANGS,
+    get_lang_display_name,
+    is_qwen_supported_lang,
+)
+from core.qwen_engine import PRESET_PROFILES, QwenEngine, estimate_preset_durations
+from core.skill_manager import SkillManager, build_ai_skill_gen_prompt, parse_ai_generated_skill
+from core.slot_recommender import rank_inject_slots
+from core.tool_bootstrapper import ToolBootstrapper
+from extractors.localization_hub import (
+    apply_slot_translations,
+    extract_slot_entries,
+    scan_game_languages,
+)
+from safety_shield.anticheat_guard import scan_anticheat
+from safety_shield.backup_manager import BackupManager
+from safety_shield.encoding_guard import (
+    detect_translation_anomaly,
+    strip_thinking,
+    try_fix_mojibake,
+    validate_serialized_syntax,
+)
+from safety_shield.font_patcher import FontPatcher
+from safety_shield.tag_firewall import mask_tags, validate_and_unmask
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("sakuga.app")
+
+FRONTEND_DIR = APP_DIR / "frontend"
+for _runtime_dir in ("backups", "cache", "covers", "tools"):
+    (APP_DIR / _runtime_dir).mkdir(parents=True, exist_ok=True)
+
+hw_profiler = HardwareProfiler(APP_DIR / "settings.json")
+hw_profiler.apply_ollama_env()
+skill_manager = SkillManager(APP_DIR / "skills")
+library_db = LibraryDB(APP_DIR / "library.db")
+global_tm = GlobalTMDB(APP_DIR / "global_tm.db")
+backup_mgr = BackupManager(APP_DIR / "backups")
+qwen_engine = QwenEngine(profiler=hw_profiler)
+tool_boot = ToolBootstrapper(APP_DIR / "tools")
+font_patcher = FontPatcher(APP_DIR / "tools" / "fonts")
+
+# Active translation jobs & SSE subscribers
+_job_states: Dict[str, Dict[str, Any]] = {}
+_sse_queues: Set[asyncio.Queue] = set()
+_wv_window = None
+_tray_controller: Optional[WinSystemTray] = None
+_force_app_exit: bool = False
+_tray_balloon_shown: bool = False
+_instance_mutex_handle: Optional[int] = None
+
+_APP_TITLE = "Black Sakura Translate"
+_APP_IDENTITY = "sakuga_localization_launcher"
+_SINGLE_INSTANCE_MUTEX_NAME = "Local\\SakugaLocalizationLauncher_SingleInstance_v1"
+_INSTANCE_LOCK_PATH = APP_DIR / ".instance_lock.json"
+
+
+def _any_job_running() -> bool:
+    return any(st.get("status") == "running" for st in _job_states.values())
+
+
+def _restore_window_from_tray() -> None:
+    if _wv_window is None:
+        return
+    try:
+        _wv_window.show()
+        _wv_window.restore()
+    except Exception:
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+            user32.FindWindowW.restype = wintypes.HWND
+            hwnd = user32.FindWindowW(None, _APP_TITLE)
+            if hwnd:
+                if user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                else:
+                    user32.ShowWindow(hwnd, 5)  # SW_SHOW
+                user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+
+
+def _hide_window_to_tray(show_tip: bool = True) -> None:
+    global _tray_balloon_shown
+    if _wv_window is None:
+        return
+    try:
+        _wv_window.hide()
+    except Exception:
+        pass
+    if show_tip and _tray_controller is not None and not _tray_balloon_shown:
+        _tray_balloon_shown = True
+        msg = (
+            "Tiến trình Dịch / Fix lỗi đang chạy ngầm an toàn. Bấm icon Black Sakura Translate dưới khay để mở lại."
+            if _any_job_running()
+            else "Đã thu gọn xuống khay hệ thống. Bấm icon Black Sakura Translate ở khay để mở lại."
+        )
+        _tray_controller.show_balloon("Black Sakura Translate", msg)
+
+
+def emit_sse(event: str, data: Dict[str, Any]) -> None:
+    payload = {"event": event, "data": data, "ts": time.time()}
+    for q in list(_sse_queues):
+        try:
+            q.put_nowait(payload)
+        except Exception:
+            pass
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async def _initial_bootstrap():
+        try:
+            roots = [APP_DIR / "backups"] + [g.get("game_dir", "") for g in library_db.list_games()]
+            await asyncio.to_thread(cleanup_orphaned_temps, roots)
+        except Exception:
+            pass
+        st = tool_boot.get_status()
+        if not st["all_ready"]:
+            def _cb(info):
+                emit_sse("tool_progress", info)
+            await tool_boot.ensure_all(force=False, progress_cb=_cb)
+            emit_sse("tool_status", tool_boot.get_status())
+
+    asyncio.create_task(_initial_bootstrap())
+    yield
+
+
+app = FastAPI(title="Black Sakura Translate", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+
+# ---------------- Pydantic Models ---------------- #
+
+class AddGameRequest(BaseModel):
+    path: str
+
+
+class ScanRequest(BaseModel):
+    source_lang: Optional[str] = None
+    target_lang: Optional[str] = "vi"
+    scope: str = "FULL_PATCH"
+    translate_choices: bool = True
+
+
+class SlotRankRequest(BaseModel):
+    source_lang: str = "en"
+    target_lang: str = "vi"
+
+
+class UpdateProfileRequest(BaseModel):
+    title: Optional[str] = None
+    launch_mode: Optional[str] = None
+    steam_appid: Optional[str] = None
+    shortcut_path: Optional[str] = None
+    exe_path: Optional[str] = None
+    game_description: Optional[str] = None
+    tone_preset: Optional[str] = None
+    style_skill_id: Optional[str] = None
+    lang_skill_override: Optional[str] = None
+    compiled_style_card: Optional[str] = None
+    inject_slot: Optional[str] = None
+    source_lang: Optional[str] = None
+    target_lang: Optional[str] = None
+
+
+class StartTranslateRequest(BaseModel):
+    game_id: str
+    source_lang: str = "en"
+    target_lang: str = "vi"
+    inject_slot: str
+    scope: str = "FULL_PATCH"
+    ai_mode: str = "AUTO_HYBRID"
+    translate_choices: bool = True
+    keep_proper_nouns: bool = True
+    patch_fonts: bool = True
+    force_offline_override: bool = False
+    preset_level: Optional[str] = None
+    style_skill_id: Optional[str] = None
+    lang_skill_override: Optional[str] = None
+    bypass_global_tm: bool = False
+
+
+class GlossaryAddRequest(BaseModel):
+    source_lang: str = "en"
+    target_lang: str = "vi"
+    source_term: str
+    target_term: str
+    note: str = ""
+
+
+class EditTranslationRequest(BaseModel):
+    str_hash: str
+    translated_text: str
+
+
+class RepairRequest(BaseModel):
+    retry_with_ai: bool = True
+    polish_awkward: bool = True
+    fix_fonts: bool = True
+    force_offline_override: bool = False
+    style_skill_id: Optional[str] = None
+    lang_skill_override: Optional[str] = None
+
+
+class ApplySavedTranslationRequest(BaseModel):
+    source_lang: str = "en"
+    target_lang: str = "vi"
+    inject_slot: Optional[str] = None
+    patch_fonts: bool = True
+    force_offline_override: bool = False
+
+
+class UiThemeRequest(BaseModel):
+    theme: str = "mono-ink"
+
+
+class MinimizeTrayRequest(BaseModel):
+    enabled: bool = True
+
+
+class HardwareSettingsRequest(BaseModel):
+    auto_tune: Optional[bool] = None
+    main_model: Optional[str] = None
+    dual_model_enabled: Optional[bool] = None
+    ui_fast_model: Optional[str] = None
+    quiet_mode: Optional[bool] = None
+    parallel_workers: Optional[int] = None
+    num_ctx: Optional[int] = None
+    ui_batch_size: Optional[int] = None
+    sub_batch_size: Optional[int] = None
+    kv_cache_type: Optional[str] = None
+    ollama_base_url: Optional[str] = None
+
+
+class BulkReplaceRequest(BaseModel):
+    find_text: str
+    replace_text: str
+    case_sensitive: bool = False
+    category_filter: str = "ALL"
+    hot_apply: bool = False
+
+
+class SakugaPackImportRequest(BaseModel):
+    filename: str = "pack.sakugapack"
+    content_b64: str
+    auto_apply: bool = True
+    inject_slot: Optional[str] = None
+
+
+class PullModelRequest(BaseModel):
+    model: str
+
+
+class SaveSkillRequest(BaseModel):
+    id: Optional[str] = None
+    layer: str = "styles"
+    name: str
+    icon: str = "🎭"
+    description: str = ""
+    language_pair: str = "any"
+    source_lang: str = "any"
+    target_lang: str = "any"
+    source_langs: Optional[List[str]] = None
+    target_langs: Optional[List[str]] = None
+    priority: int = 50
+    rules: Any = ""
+    rules_text: Optional[str] = None
+    examples: List[Dict[str, str]] = []
+
+
+class ImportSkillRequest(BaseModel):
+    filename: str
+    content_b64: Optional[str] = None
+    raw_text: Optional[str] = None
+
+
+class AiSkillGenRequest(BaseModel):
+    idea: str
+    layer: str = "styles"
+    source_lang: str = "en"
+    target_lang: str = "vi"
+    auto_save: bool = False
+
+
+class ReapplySkillRequest(BaseModel):
+    style_skill_id: Optional[str] = None
+    lang_skill_override: Optional[str] = None
+    scope: str = "flagged_only"
+    keep_manual_locked: bool = True
+    auto_start: bool = True
+
+
+# ---------------- Frontend & Health ---------------- #
+
+@app.get("/")
+async def index():
+    return FileResponse(str(FRONTEND_DIR / "index.html"))
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    ico = APP_DIR / "sakuga_icon.ico"
+    if ico.exists():
+        return FileResponse(str(ico))
+    raise HTTPException(status_code=404, detail="Icon not found")
+
+
+@app.get("/covers/{filename}")
+async def serve_cover(filename: str):
+    target = (COVERS_DIR / filename).resolve()
+    if target.parent != COVERS_DIR.resolve() or not target.exists():
+        raise HTTPException(status_code=404, detail="Cover not found")
+    return FileResponse(str(target))
+
+
+@app.get("/api/health")
+async def api_health():
+    ollama_st, telemetry, hw_eff = await asyncio.gather(
+        qwen_engine.check_ollama_status(),
+        asyncio.to_thread(qwen_engine.get_telemetry),
+        asyncio.to_thread(hw_profiler.get_effective_settings),
+    )
+    return {
+        "ok": True,
+        "ollama": ollama_st,
+        "telemetry": telemetry,
+        "hardware": hw_eff,
+        "tools": tool_boot.get_status(),
+        "tm_stats": global_tm.stats(),
+        "supported_langs": QWEN35_SUPPORTED_LANGS,
+        "ui_theme": library_db.get_setting("ui_theme", "mono-ink"),
+        "minimize_to_tray": library_db.get_setting("minimize_to_tray", "1") == "1",
+    }
+
+
+@app.post("/api/ui/theme")
+async def api_save_ui_theme(req: UiThemeRequest):
+    allowed = {"mono-ink", "obsidian", "sakuga-indigo", "cyber-ice", "amber-ink"}
+    theme = req.theme if req.theme in allowed else "mono-ink"
+    library_db.set_setting("ui_theme", theme)
+    return {"ok": True, "theme": theme}
+
+
+@app.post("/api/ui/minimize-to-tray")
+async def api_save_minimize_to_tray(req: MinimizeTrayRequest):
+    library_db.set_setting("minimize_to_tray", "1" if req.enabled else "0")
+    return {"ok": True, "enabled": bool(req.enabled)}
+
+
+@app.post("/api/ui/hide-to-tray")
+async def api_hide_to_tray():
+    if _wv_window is None:
+        return {"ok": False, "tray_active": False}
+    threading.Thread(target=lambda: _hide_window_to_tray(True), daemon=True).start()
+    return {"ok": True, "tray_active": True}
+
+
+@app.get("/api/ui/identity")
+async def api_ui_identity():
+    return {"ok": True, "app": _APP_IDENTITY, "pid": os.getpid()}
+
+
+@app.post("/api/ui/activate")
+async def api_ui_activate():
+    if _wv_window is not None:
+        threading.Thread(target=_restore_window_from_tray, daemon=True).start()
+    return {
+        "ok": True,
+        "app": _APP_IDENTITY,
+        "pid": os.getpid(),
+        "activated": _wv_window is not None,
+    }
+
+
+@app.get("/api/tools/status")
+async def api_tools_status():
+    return tool_boot.get_status()
+
+
+@app.post("/api/tools/bootstrap")
+async def api_tools_bootstrap(force: bool = True):
+    async def _run():
+        res = await tool_boot.ensure_all(force=force, progress_cb=lambda info: emit_sse("tool_progress", info))
+        emit_sse("tool_status", res["status"])
+    asyncio.create_task(_run())
+    return {"ok": True, "started": True}
+
+
+# ---------------- Game Library & Launcher ---------------- #
+
+@app.get("/api/steam/discover")
+async def api_steam_discover():
+    apps = await asyncio.to_thread(collect_steam_apps)
+    existing_dirs = {os.path.normcase(g["game_dir"]) for g in library_db.list_games()}
+    for a in apps:
+        a["already_added"] = os.path.normcase(a["game_dir"]) in existing_dirs
+    return {"apps": apps}
+
+
+_cover_retry_after: Dict[str, float] = {}
+
+
+def _pick_default_source_lang(slots: List[Dict[str, Any]]) -> str:
+    non_empty_supported = [
+        s for s in slots if int(s.get("count", 0) or 0) > 0 and is_qwen_supported_lang(s.get("slot_id", ""))
+    ]
+    if any(s["slot_id"] == "en" for s in non_empty_supported):
+        return "en"
+    if non_empty_supported:
+        return non_empty_supported[0]["slot_id"]
+    supported = [s for s in slots if is_qwen_supported_lang(s.get("slot_id", ""))]
+    if any(s["slot_id"] == "en" for s in supported):
+        return "en"
+    if supported:
+        return supported[0]["slot_id"]
+    return slots[0]["slot_id"] if slots else "en"
+
+
+async def _resolve_cover_url(game: Dict[str, Any], force_refresh: bool = False) -> str:
+    gid = game["game_id"]
+    cpath = game.get("cover_path") or ""
+    if not force_refresh and cpath and Path(cpath).exists() and Path(cpath).stat().st_size > 1024:
+        return f"/covers/{Path(cpath).name}"
+    appid = (game.get("steam_appid") or "").strip()
+    now = time.time()
+    if appid and appid.isdigit() and (force_refresh or _cover_retry_after.get(gid, 0.0) <= now):
+        downloaded = await download_steam_cover(gid, appid, covers_dir=COVERS_DIR)
+        if downloaded and Path(downloaded).exists() and Path(downloaded).stat().st_size > 1024:
+            library_db.update_fields(gid, cover_path=downloaded)
+            game["cover_path"] = downloaded
+            _cover_retry_after.pop(gid, None)
+            return f"/covers/{Path(downloaded).name}?t={int(now)}"
+        _cover_retry_after[gid] = now + 300.0
+    return ""
+
+
+def _enrich_game_skill_metadata(game: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach resolved 2-Layer Skill Hub metadata and detect skill mismatch against applied signature."""
+    src = game.get("source_lang") or "en"
+    tgt = game.get("target_lang") or "vi"
+    eff_style = (game.get("style_skill_id") or "").strip() or (game.get("tone_preset") or "natural_standard")
+    lang_ov = (game.get("lang_skill_override") or "auto").strip() or "auto"
+    resolved = skill_manager.resolve_active_skills(
+        source_lang=src,
+        target_lang=tgt,
+        style_skill_id=eff_style,
+        lang_skill_override=lang_ov,
+        source_lang_name=get_lang_display_name(src),
+        target_lang_name=get_lang_display_name(tgt),
+    )
+    game["style_skill_id"] = resolved["style_skill"]["id"] if resolved.get("style_skill") else eff_style
+    game["lang_skill_override"] = lang_ov
+    applied_sig = game.get("applied_skill_signature") or ""
+    game["applied_skill_signature"] = applied_sig
+    game["current_skill_signature"] = resolved["skill_signature"]
+    game["active_lang_skill"] = resolved.get("lang_skill")
+    game["active_style_skill"] = resolved.get("style_skill")
+    game["skill_tokens"] = resolved.get("combined_tokens", 0)
+    done_cnt = int(game.get("translated_strings") or 0)
+    game["skill_changed"] = bool(
+        done_cnt > 0
+        and (
+            (applied_sig and applied_sig != resolved["skill_signature"])
+            or (not applied_sig and game["style_skill_id"] != "natural_standard")
+        )
+    )
+    return game
+
+
+def _hydrate_saved_translation_flags(game: Dict[str, Any]) -> None:
+    """Detect cached translations in cache/<game_id>.db so restored/re-added games still show 'Đã dịch'."""
+    gid = game["game_id"]
+    cache_db = GameCacheDB(gid, APP_DIR / "cache")
+    saved_packs = cache_db.list_saved_translations()
+    game["has_saved_translation"] = len(saved_packs) > 0
+    game["saved_translations_count"] = len(saved_packs)
+    game["saved_pct"] = max((float(p.get("pct") or 0.0) for p in saved_packs), default=0.0)
+    game["interrupted_job"] = (
+        None
+        if _job_states.get(gid, {}).get("status") == "running"
+        else library_db.get_job_journal(gid)
+    )
+    if saved_packs and (not game.get("total_strings") or not game.get("translated_strings")):
+        src = game.get("source_lang") or "en"
+        tgt = game.get("target_lang") or "vi"
+        preferred = next((p for p in saved_packs if p["source_lang"] == src and p["target_lang"] == tgt), saved_packs[0])
+        game["total_strings"] = int(preferred["total"])
+        game["translated_strings"] = int(preferred["done"])
+        game["progress_pct"] = float(preferred["pct"])
+        library_db.update_fields(
+            gid,
+            total_strings=game["total_strings"],
+            translated_strings=game["translated_strings"],
+            progress_pct=game["progress_pct"],
+        )
+    game["update_watch"] = backup_mgr.check_game_update_status(
+        gid, game.get("game_dir"), bool(game.get("is_patched"))
+    )
+    _enrich_game_skill_metadata(game)
+
+
+@app.get("/api/games")
+async def api_list_games():
+    games = library_db.list_games()
+    for g in games:
+        gid = g["game_id"]
+        _hydrate_saved_translation_flags(g)
+        g["cover_url"] = await _resolve_cover_url(g)
+        g["has_backup"] = backup_mgr.has_backup(gid, g.get("game_dir"))
+        g["ranked_slots"] = rank_inject_slots(g.get("detected_slots", []), g.get("source_lang", "en"), g.get("target_lang", "vi"))
+        g["job_running"] = _job_states.get(gid, {}).get("status") == "running"
+        g["job_paused"] = qwen_engine.is_paused(gid)
+    return {"games": games}
+
+
+@app.post("/api/games/add")
+async def api_add_game(req: AddGameRequest):
+    try:
+        profile = await ingest_game_input(req.path, covers_dir=COVERS_DIR)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Không thể nạp game: {exc}")
+
+    slots = profile.get("detected_slots", [])
+    source_lang = _pick_default_source_lang(slots)
+    ranked = rank_inject_slots(slots, source_lang, "vi")
+    default_inject = ranked[0]["slot_id"] if ranked else source_lang
+
+    saved = library_db.upsert_game(
+        {
+            "game_id": profile["game_id"],
+            "title": profile["title"],
+            "game_dir": profile["game_dir"],
+            "exe_path": profile["exe_path"],
+            "steam_appid": profile["steam_appid"],
+            "launch_mode": profile["launch_mode"],
+            "shortcut_path": profile["shortcut_path"],
+            "cover_path": profile["cover_path"],
+            "game_description": profile.get("game_description", ""),
+            "engine": profile["engine"],
+            "method": profile["method"],
+            "anticheat_status": profile["anticheat_status"],
+            "anticheat_vendors": json.dumps(profile["anticheat_vendors"], ensure_ascii=False),
+            "anticheat_files": json.dumps(profile["anticheat_files"], ensure_ascii=False),
+            "detected_slots_json": json.dumps(slots, ensure_ascii=False),
+            "source_lang": source_lang,
+            "target_lang": "vi",
+            "inject_slot": default_inject,
+        }
+    )
+    saved["cover_url"] = await _resolve_cover_url(saved)
+    saved["ranked_slots"] = ranked
+    saved["has_backup"] = backup_mgr.has_backup(saved["game_id"], saved["game_dir"])
+    _hydrate_saved_translation_flags(saved)
+    return {"ok": True, "game": saved}
+
+
+@app.get("/api/games/{game_id}")
+async def api_get_game(game_id: str):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    _hydrate_saved_translation_flags(game)
+    game["cover_url"] = await _resolve_cover_url(game)
+    game["has_backup"] = backup_mgr.has_backup(game_id, game.get("game_dir"))
+    game["backup_info"] = backup_mgr.get_backup_info(game_id, game.get("game_dir"))
+    game["ranked_slots"] = rank_inject_slots(game.get("detected_slots", []), game.get("source_lang", "en"), game.get("target_lang", "vi"))
+    return {"game": game}
+
+
+@app.delete("/api/games/{game_id}")
+async def api_delete_game(game_id: str):
+    game = library_db.get_game(game_id)
+    library_db.delete_game(game_id)
+    gdir = (game or {}).get("game_dir") or ""
+    tmp_root = os.path.normcase(os.path.abspath(tempfile.gettempdir()))
+    is_temp_or_missing = (not gdir) or (not Path(gdir).exists()) or os.path.normcase(os.path.abspath(gdir)).startswith(tmp_root)
+    if is_temp_or_missing:
+        gc.collect()
+        for suffix in (".db", ".db-wal", ".db-shm"):
+            try:
+                (APP_DIR / "cache" / f"{game_id}{suffix}").unlink(missing_ok=True)
+            except OSError:
+                pass
+        for cov in (APP_DIR / "covers").glob(f"{game_id}.*"):
+            try:
+                cov.unlink(missing_ok=True)
+            except OSError:
+                pass
+        shutil.rmtree(APP_DIR / "backups" / game_id, ignore_errors=True)
+    return {"ok": True}
+
+
+@app.patch("/api/games/{game_id}/profile")
+async def api_update_profile(game_id: str, req: UpdateProfileRequest):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    if "style_skill_id" in updates and "tone_preset" not in updates:
+        updates["tone_preset"] = updates["style_skill_id"]
+    elif "tone_preset" in updates and "style_skill_id" not in updates:
+        updates["style_skill_id"] = updates["tone_preset"]
+
+    # Force Phase 0 to recompile Style Card whenever user changes game_description, skill, or tone
+    if any(k in updates for k in ("game_description", "tone_preset", "style_skill_id", "lang_skill_override")) and "compiled_style_card" not in updates:
+        if (
+            updates.get("game_description", game.get("game_description")) != game.get("game_description")
+            or updates.get("tone_preset", game.get("tone_preset")) != game.get("tone_preset")
+            or updates.get("style_skill_id", game.get("style_skill_id")) != game.get("style_skill_id")
+            or updates.get("lang_skill_override", game.get("lang_skill_override")) != game.get("lang_skill_override")
+        ):
+            updates["compiled_style_card"] = ""
+    updated = library_db.update_fields(game_id, **updates)
+    _enrich_game_skill_metadata(updated)
+    return {"ok": True, "game": updated}
+
+
+@app.post("/api/games/{game_id}/fetch-context")
+async def api_fetch_steam_context(game_id: str):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    appid = (game.get("steam_appid") or "").strip()
+    if not appid:
+        return {"ok": False, "game_description": game.get("game_description", ""), "message": "Game không có Steam AppID."}
+    desc = await fetch_steam_app_context(appid)
+    if desc:
+        updated = library_db.update_fields(game_id, game_description=desc, compiled_style_card="")
+        return {"ok": True, "game_description": desc, "game": updated}
+    return {"ok": False, "game_description": game.get("game_description", ""), "message": "Không lấy được mô tả từ Steam Store (Offline hoặc AppID ẩn)."}
+
+
+@app.post("/api/games/{game_id}/cover")
+async def api_upload_cover(game_id: str, file: UploadFile = File(...)):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    COVERS_DIR.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename or "cover.jpg").suffix.lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        ext = ".jpg"
+    dest = COVERS_DIR / f"{game_id}{ext}"
+    dest.write_bytes(await file.read())
+    library_db.update_fields(game_id, cover_path=str(dest))
+    return {"ok": True, "cover_url": f"/covers/{dest.name}?t={int(time.time())}"}
+
+
+@app.post("/api/games/{game_id}/slots")
+async def api_rank_slots(game_id: str, req: SlotRankRequest):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    ranked = rank_inject_slots(game.get("detected_slots", []), req.source_lang, req.target_lang)
+    return {"ranked_slots": ranked}
+
+
+@app.post("/api/games/{game_id}/scan")
+async def api_scan_game(game_id: str, req: ScanRequest):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    game_dir = game["game_dir"]
+    ac_report = await asyncio.to_thread(scan_anticheat, game_dir)
+    loc_report = await asyncio.to_thread(scan_game_languages, game_dir)
+    slots = loc_report.get("slots", [])
+
+    src_lang = req.source_lang or game.get("source_lang") or "en"
+    slot_map = {s["slot_id"]: s for s in slots}
+    if src_lang not in slot_map and slots:
+        src_lang = _pick_default_source_lang(slots)
+    tgt_lang = req.target_lang or game.get("target_lang") or "vi"
+    if not is_qwen_supported_lang(tgt_lang):
+        tgt_lang = "vi"
+
+    extract_stats = {"raw_count": 0, "unique_count": 0, "dedup_saved_pct": 0.0, "ui_count": 0, "sub_count": 0, "tm_hits": 0, "estimates": {}}
+    if src_lang in slot_map:
+        extracted = await asyncio.to_thread(
+            backup_mgr.extract_entries_preferring_backup,
+            game_id,
+            game_dir,
+            slot_map[src_lang],
+            extract_slot_entries,
+            req.scope,
+            req.translate_choices,
+        )
+        # Always compute calibrated 3-preset estimates against FULL entries (and SUB_ONLY subset) before scope narrowing
+        full_extracted = (
+            extracted
+            if req.scope == "FULL_PATCH"
+            else await asyncio.to_thread(
+                backup_mgr.extract_entries_preferring_backup,
+                game_id,
+                game_dir,
+                slot_map[src_lang],
+                extract_slot_entries,
+                "FULL_PATCH",
+                True,
+            )
+        )
+        cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+        dedup = cache_db.store_extracted_entries(extracted["entries"], src_lang, tgt_lang, mask_tags)
+        pending = cache_db.get_pending_strings(src_lang, tgt_lang)
+        tm_hit_map = global_tm.lookup_exact_batch([e.text for e in full_extracted["entries"]], src_lang, tgt_lang)
+        has_gloss = bool(cache_db.list_glossary_terms(src_lang, tgt_lang))
+        estimates = estimate_preset_durations(
+            full_extracted["entries"], set(tm_hit_map.keys()), has_glossary=has_gloss, profiler=hw_profiler
+        )
+        tm_hits = len(global_tm.lookup_exact_batch([p["source_text"] for p in pending], src_lang, tgt_lang))
+        prog = cache_db.get_progress(src_lang, tgt_lang)
+        extract_stats = {
+            "raw_count": extracted["total_raw"],
+            "filtered_count": extracted["filtered_count"],
+            "exact_unique_count": dedup.get("exact_unique_count", dedup["unique_count"]),
+            "unique_count": dedup["unique_count"],
+            "num_folded_saved": dedup.get("num_folded_saved", 0),
+            "dedup_saved_pct": dedup["dedup_saved_pct"],
+            "ui_count": extracted["ui_count"],
+            "sub_count": extracted["sub_count"],
+            "tm_hits": tm_hits,
+            "progress_pct": prog["pct"],
+            "done": prog["done"],
+            "estimates": estimates,
+        }
+
+    ranked = rank_inject_slots(slots, src_lang, tgt_lang)
+    inject_slot = game.get("inject_slot") or (ranked[0]["slot_id"] if ranked else src_lang)
+
+    updated = library_db.update_fields(
+        game_id,
+        engine=loc_report.get("engine", game["engine"]),
+        method=loc_report.get("method", game["method"]),
+        anticheat_status=ac_report["risk_level"],
+        anticheat_vendors=ac_report["detected_ac"],
+        anticheat_files=ac_report["matched_files"],
+        detected_slots_json=slots,
+        source_lang=src_lang,
+        target_lang=tgt_lang,
+        inject_slot=inject_slot,
+        scope=req.scope,
+        total_strings=extract_stats["unique_count"],
+        translated_strings=extract_stats.get("done", 0),
+        progress_pct=extract_stats.get("progress_pct", 0.0),
+    )
+    _hydrate_saved_translation_flags(updated)
+    updated["ranked_slots"] = ranked
+    updated["has_backup"] = backup_mgr.has_backup(game_id, game_dir)
+    updated["backup_info"] = backup_mgr.get_backup_info(game_id, game_dir)
+    updated["cover_url"] = await _resolve_cover_url(updated, force_refresh=not bool(updated.get("cover_path") and Path(updated["cover_path"]).exists()))
+    return {"ok": True, "game": updated, "scan_stats": extract_stats, "anticheat": ac_report}
+
+
+@app.post("/api/games/{game_id}/launch")
+async def api_launch_game(game_id: str):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    try:
+        res = await launch_game_safely(game, qwen_engine)
+        library_db.update_fields(game_id, last_played_at=int(time.time()))
+        emit_sse("vram_flushed", {"game_id": game_id, "telemetry": qwen_engine.get_telemetry()})
+        return res
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lỗi khởi chạy game: {exc}")
+
+
+@app.post("/api/games/{game_id}/restore")
+async def api_restore_game(game_id: str):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    res = await asyncio.to_thread(backup_mgr.restore_original, game_id, game["game_dir"])
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Không thể khôi phục bản gốc."))
+    library_db.update_fields(game_id, is_patched=0)
+    emit_sse("game_restored", {"game_id": game_id, **res})
+    return res
+
+
+@app.post("/api/games/{game_id}/open-backup")
+async def api_open_backup_dir(game_id: str):
+    game = library_db.get_game(game_id)
+    info = backup_mgr.get_backup_info(game_id, game.get("game_dir") if game else None)
+    bdir = Path(info["backup_dir"])
+    bdir.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        os.startfile(str(bdir))
+    return {"ok": True, "path": str(bdir)}
+
+
+@app.delete("/api/games/{game_id}/interrupted-job")
+async def api_clear_interrupted_job(game_id: str):
+    library_db.clear_job_journal(game_id)
+    return {"ok": True}
+
+
+@app.post("/api/games/{game_id}/repair")
+async def api_repair_game(game_id: str, req: RepairRequest = RepairRequest()):
+    """Post-translation 1-Click Error Fixer:
+    1. Audit & strip <think>, recover raw __TAG_x__/__NL__, reset FALLBACK/tag-broken rows.
+    2. Re-translate pending/broken rows if Ollama is online and retry_with_ai=True.
+    3. Fix Steam DRM black-screen (direct_exe -> steam when steam_appid exists).
+    4. Re-apply translations, sync Unity Addressables catalog.bin CRC/Size, validate XML/JSON syntax, optionally patch fonts.
+    """
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    ac_report = await asyncio.to_thread(scan_anticheat, game["game_dir"])
+    if ac_report["risk_level"] == "BLOCKED" and not req.force_offline_override:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "ANTICHEAT_BLOCKED",
+                "message": ac_report["message"],
+                "detected_ac": ac_report["detected_ac"],
+            },
+        )
+
+    if _job_states.get(game_id, {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="Tiến trình cho game này đang chạy.")
+
+    src = game.get("source_lang") or "en"
+    tgt = game.get("target_lang") or "vi"
+    inject_slot = game.get("inject_slot") or src
+    scope = game.get("scope") or "FULL_PATCH"
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    qwen_engine.reset_pause_state(game_id)
+
+    _job_states[game_id] = {"status": "running", "mode": "REPAIR", "started_at": time.time()}
+    library_db.set_job_journal(
+        game_id,
+        {
+            "mode": "REPAIR",
+            "source_lang": src,
+            "target_lang": tgt,
+            "inject_slot": inject_slot,
+            "fix_fonts": bool(req.fix_fonts),
+            "started_at": int(time.time()),
+        },
+    )
+
+    try:
+        # Step 0: Sync clean source entries from original_backup.zip (recovers newly unmasked [brackets] & prevents overwritten source loops)
+        slots = game.get("detected_slots", [])
+        slot_map = {s["slot_id"]: s for s in slots}
+        pre_extracted: Optional[Dict[str, Any]] = None
+        if src in slot_map:
+            pre_extracted = await asyncio.to_thread(
+                backup_mgr.extract_entries_preferring_backup,
+                game_id,
+                game["game_dir"],
+                slot_map[src],
+                extract_slot_entries,
+                scope,
+                True,
+            )
+            if pre_extracted.get("entries"):
+                cache_db.store_extracted_entries(pre_extracted["entries"], src, tgt, mask_tags)
+
+        # Step 1: Audit cache & recover corrupted tags / <think> / mojibake / pipe-split / CJK & French leaks
+        emit_sse(
+            "progress",
+            {
+                "game_id": game_id,
+                "weighted_pct": 5.0,
+                "phase": "REPAIR_AUDIT",
+                "phase_label": "Fix lỗi • Đang quét lỗi thẻ tag, UTF-8 & từ vô nghĩa...",
+                "tokens_done": 0,
+                "tok_per_sec": 0.0,
+                "telemetry": await asyncio.to_thread(qwen_engine.get_telemetry),
+            },
+        )
+        audit = await asyncio.to_thread(
+            cache_db.audit_and_repair_cache,
+            src,
+            tgt,
+            strip_thinking,
+            validate_and_unmask,
+            anomaly_check_fn=detect_translation_anomaly,
+            mojibake_fix_fn=try_fix_mojibake,
+        )
+        if audit.get("reset_sources"):
+            global_tm.delete_by_sources(audit["reset_sources"], src, tgt)
+        global_tm.purge_anomalies(detect_translation_anomaly, src, tgt)
+
+        # Step 2: Re-translate faulty/remaining items & run AI QA polish pass ONLY if game already has translated progress
+        retranslated = 0
+        qa_res: Dict[str, Any] = {"reviewed": 0, "polished": 0, "samples": []}
+        ollama_st = await qwen_engine.check_ollama_status()
+        had_done = cache_db.get_progress(src, tgt)["done"] > 0
+        pending_after = cache_db.get_pending_strings(src, tgt) if (audit["reset_pending"] > 0 or had_done) else []
+        if req.retry_with_ai and (pending_after or (req.polish_awkward and had_done)):
+            if not ollama_st.get("online"):
+                await qwen_engine.ensure_ollama_running()
+                ollama_st = await qwen_engine.check_ollama_status()
+            if ollama_st.get("online"):
+                rep_style = req.style_skill_id or game.get("style_skill_id") or game.get("tone_preset") or "natural_standard"
+                rep_lang_ov = req.lang_skill_override or game.get("lang_skill_override") or "auto"
+                if pending_after:
+                    res_ai = await qwen_engine.run_translation_pipeline(
+                        game_id=game_id,
+                        source_lang=src,
+                        target_lang=tgt,
+                        scope=scope,
+                        ai_mode="AUTO_HYBRID",
+                        keep_proper_nouns=True,
+                        cache_db=cache_db,
+                        global_tm=global_tm,
+                        emit_cb=lambda ev, p: emit_sse(ev, {"game_id": game_id, **p}),
+                        game_description=game.get("game_description", ""),
+                        tone_preset=game.get("tone_preset") or "natural",
+                        compiled_style_card=game.get("compiled_style_card", ""),
+                        style_card_cb=lambda card: library_db.update_fields(game_id, compiled_style_card=card),
+                        style_skill_id=rep_style,
+                        lang_skill_override=rep_lang_ov,
+                        bypass_global_tm=True,
+                    )
+                    retranslated = int(res_ai.get("llm_translated", 0)) + int(res_ai.get("tm_hits", 0))
+                if req.polish_awkward and cache_db.get_progress(src, tgt)["done"] > 0:
+                    qa_res = await qwen_engine.qa_polish_translations(
+                        cache_db=cache_db,
+                        global_tm=global_tm,
+                        source_lang=src,
+                        target_lang=tgt,
+                        emit_cb=lambda ev, p: emit_sse(ev, {"game_id": game_id, **p}),
+                        game_description=game.get("game_description", ""),
+                        tone_preset=game.get("tone_preset") or "natural",
+                        compiled_style_card=game.get("compiled_style_card", ""),
+                        game_id=game_id,
+                        style_skill_id=rep_style,
+                        lang_skill_override=rep_lang_ov,
+                    )
+
+        # Step 3: Repair Launch Mode (avoid Steamworks black screen on direct_exe)
+        fixed_launch_mode = False
+        if game.get("steam_appid") and game.get("launch_mode") == "direct_exe":
+            library_db.update_fields(game_id, launch_mode="steam")
+            fixed_launch_mode = True
+
+        # Step 4: Re-apply translations & sync catalog.bin / validate external file syntax
+        slots = game.get("detected_slots", [])
+        slot_map = {s["slot_id"]: s for s in slots}
+        write_res: Dict[str, Any] = {"ok": False, "updated": 0, "catalog_synced": False}
+        syntax_errors: List[str] = []
+
+        def _do_backup(mod_files, created_files):
+            backup_mgr.backup_files(game_id, game["game_dir"], mod_files, created_files)
+
+        if src in slot_map and inject_slot in slot_map:
+            emit_sse(
+                "progress",
+                {
+                    "game_id": game_id,
+                    "weighted_pct": 95.0,
+                    "phase": "REPAIR_APPLY",
+                    "phase_label": "Fix lỗi • Đang ghi lại file game & đồng bộ catalog.bin...",
+                    "telemetry": await asyncio.to_thread(qwen_engine.get_telemetry),
+                },
+            )
+            extracted = pre_extracted or await asyncio.to_thread(
+                backup_mgr.extract_entries_preferring_backup,
+                game_id,
+                game["game_dir"],
+                slot_map[src],
+                extract_slot_entries,
+                scope,
+                True,
+            )
+            all_tr = cache_db.get_all_translations(src, tgt)
+            if all_tr:
+                write_res = await asyncio.to_thread(
+                    apply_slot_translations,
+                    game["game_dir"],
+                    extracted["entries"],
+                    all_tr,
+                    slot_map[inject_slot],
+                    _do_backup,
+                    tgt,
+                    src,
+                )
+
+            # Syntax check external target files (.json/.xml)
+            for fp in slot_map[inject_slot].get("files", []):
+                p = Path(fp)
+                if p.exists() and p.suffix.lower() in (".json", ".xml"):
+                    ok_syn, syn_msg = validate_serialized_syntax(p.suffix, p.read_text(encoding="utf-8-sig", errors="replace"))
+                    if not ok_syn:
+                        syntax_errors.append(f"{p.name}: {syn_msg}")
+
+        font_res = {"applied": False}
+        if req.fix_fonts:
+            font_res = await asyncio.to_thread(
+                font_patcher.apply_font_patch, game["game_dir"], game["engine"], inject_slot, _do_backup
+            )
+        if write_res.get("ok"):
+            await asyncio.to_thread(backup_mgr.record_patched_state, game_id, game["game_dir"])
+
+        prog = cache_db.get_progress(src, tgt)
+        library_db.update_fields(
+            game_id,
+            total_strings=prog["total"],
+            translated_strings=prog["done"],
+            progress_pct=prog["pct"],
+            is_patched=1 if write_res.get("ok") else game.get("is_patched", 0),
+        )
+
+        queued_cnt = len(pending_after)
+        summary = [
+            f"Kiểm tra {audit['total_checked']} câu: dọn {audit['cleaned_think']} <think>, khôi phục {audit['unmasked_repaired']} thẻ tag, sửa {audit.get('mojibake_repaired', 0)} lỗi bảng mã UTF-8.",
+            f"Đặt lại {audit['reset_pending']} câu lỗi mới ({audit.get('gibberish_reset', 0)} từ vô nghĩa/lọt ngoại ngữ) • hàng chờ sửa {queued_cnt} câu • đã dịch lại {retranslated} câu"
+            + (" (Ollama đang Offline nên giữ lại hàng chờ)." if (queued_cnt > 0 and not ollama_st.get("online")) else "."),
+        ]
+        if fixed_launch_mode:
+            summary.append("Đã chuyển Launch Mode về Steam Launcher để chống lỗi đen màn hình.")
+        if qa_res.get("reviewed"):
+            summary.append(
+                f"AI QA rà {qa_res['reviewed']} câu: chuốt mượt lại {qa_res['polished']} câu gượng / lệch nghĩa / sót từ nối."
+            )
+        if write_res.get("ok"):
+            extra = " + đã đồng bộ catalog.bin" if write_res.get("catalog_synced") else ""
+            if write_res.get("language_label_renamed"):
+                extra += " + đã đổi tên hiển thị slot thành Tiếng Việt"
+            summary.append(f"Đã ghi lại {write_res.get('updated', 0)} câu vào slot [{inject_slot}]{extra}.")
+        if font_res.get("applied"):
+            patched_unity = font_res.get("patched_unity_fonts") or []
+            extra_f = f" (thay fallback: {', '.join(patched_unity)})" if patched_unity else ""
+            summary.append(f"Đã vá Font Unicode ({font_res.get('font_used')}){extra_f}.")
+        if syntax_errors:
+            summary.append(f"Cảnh báo cú pháp file: {'; '.join(syntax_errors)}")
+
+        emit_sse(
+            "repair_complete",
+            {
+                "game_id": game_id,
+                "progress": prog,
+                "tokens_done": int(qa_res.get("tokens_done", 0) or 0),
+                "telemetry": await asyncio.to_thread(qwen_engine.get_telemetry),
+            },
+        )
+
+        return {
+            "ok": len(syntax_errors) == 0,
+            "audit": audit,
+            "retranslated": retranslated,
+            "qa_polish": qa_res,
+            "ollama_online": bool(ollama_st.get("online")),
+            "fixed_launch_mode": fixed_launch_mode,
+            "write_result": write_res,
+            "font_result": font_res,
+            "syntax_errors": syntax_errors,
+            "summary": summary,
+        }
+    finally:
+        _job_states[game_id] = {"status": "done"}
+        library_db.clear_job_journal(game_id)
+        try:
+            cache_db.checkpoint()
+        except Exception:
+            pass
+
+
+# ---------------- Translation Pipeline & Anti-Cheat Gate ---------------- #
+
+@app.post("/api/translate/start")
+async def api_translate_start(req: StartTranslateRequest):
+    game = library_db.get_game(req.game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    # LAYER 1 HARD GATE: Always re-verify Anti-Cheat before modifying ANY file
+    ac_report = await asyncio.to_thread(scan_anticheat, game["game_dir"])
+    library_db.update_fields(
+        req.game_id,
+        anticheat_status=ac_report["risk_level"],
+        anticheat_vendors=ac_report["detected_ac"],
+        anticheat_files=ac_report["matched_files"],
+    )
+    if ac_report["risk_level"] == "BLOCKED" and not req.force_offline_override:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "ANTICHEAT_BLOCKED",
+                "message": ac_report["message"],
+                "detected_ac": ac_report["detected_ac"],
+                "matched_files": ac_report["matched_files"],
+            },
+        )
+
+    if _job_states.get(req.game_id, {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="Tiến trình dịch cho game này đang chạy.")
+
+    slots = game.get("detected_slots", [])
+    slot_map = {s["slot_id"]: s for s in slots}
+    if req.source_lang not in slot_map or req.inject_slot not in slot_map:
+        raise HTTPException(status_code=400, detail="Slot ngôn ngữ nguồn hoặc slot đích không hợp lệ. Hãy quét lại game.")
+    if not is_qwen_supported_lang(req.source_lang):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ngôn ngữ đầu vào [{req.source_lang}] chưa nằm trong danh sách hỗ trợ chuẩn của Local Engine.",
+        )
+    if not is_qwen_supported_lang(req.target_lang):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ngôn ngữ đầu ra [{req.target_lang}] chưa nằm trong danh sách hỗ trợ chuẩn của Local Engine.",
+        )
+
+    if req.preset_level and req.preset_level in PRESET_PROFILES:
+        prof = PRESET_PROFILES[req.preset_level]
+        req.ai_mode = prof["ai_mode"]
+        req.scope = prof["scope"]
+        req.translate_choices = prof["translate_choices"]
+        req.keep_proper_nouns = prof["keep_proper_nouns"]
+
+    eff_style = req.style_skill_id or game.get("style_skill_id") or game.get("tone_preset") or "natural_standard"
+    eff_lang_ov = req.lang_skill_override or game.get("lang_skill_override") or "auto"
+    library_db.update_fields(
+        req.game_id,
+        source_lang=req.source_lang,
+        target_lang=req.target_lang,
+        inject_slot=req.inject_slot,
+        scope=req.scope,
+        style_skill_id=eff_style,
+        tone_preset=eff_style,
+        lang_skill_override=eff_lang_ov,
+    )
+
+    _job_states[req.game_id] = {"status": "running", "mode": "TRANSLATE", "started_at": time.time()}
+    library_db.set_job_journal(
+        req.game_id,
+        {
+            "mode": "TRANSLATE",
+            "source_lang": req.source_lang,
+            "target_lang": req.target_lang,
+            "inject_slot": req.inject_slot,
+            "scope": req.scope,
+            "ai_mode": req.ai_mode,
+            "patch_fonts": bool(req.patch_fonts),
+            "style_skill_id": eff_style,
+            "lang_skill_override": eff_lang_ov,
+            "started_at": int(time.time()),
+        },
+    )
+
+    async def _worker():
+        cache_db = GameCacheDB(req.game_id, APP_DIR / "cache")
+        try:
+            def _emit(ev: str, payload: Dict[str, Any]):
+                emit_sse(ev, {"game_id": req.game_id, **payload})
+
+            extracted = await asyncio.to_thread(
+                backup_mgr.extract_entries_preferring_backup,
+                req.game_id,
+                game["game_dir"],
+                slot_map[req.source_lang],
+                extract_slot_entries,
+                req.scope,
+                req.translate_choices,
+            )
+            entries = extracted["entries"]
+            cache_db.store_extracted_entries(entries, req.source_lang, req.target_lang, mask_tags)
+
+            fresh_game = library_db.get_game(req.game_id) or game
+            active_style = eff_style or fresh_game.get("style_skill_id") or fresh_game.get("tone_preset") or "natural_standard"
+            active_lang_ov = eff_lang_ov or fresh_game.get("lang_skill_override") or "auto"
+            res = await qwen_engine.run_translation_pipeline(
+                game_id=req.game_id,
+                source_lang=req.source_lang,
+                target_lang=req.target_lang,
+                scope=req.scope,
+                ai_mode=req.ai_mode,
+                keep_proper_nouns=req.keep_proper_nouns,
+                cache_db=cache_db,
+                global_tm=global_tm,
+                emit_cb=_emit,
+                game_description=fresh_game.get("game_description", ""),
+                tone_preset=fresh_game.get("tone_preset") or "natural",
+                compiled_style_card=fresh_game.get("compiled_style_card", ""),
+                style_card_cb=lambda card: library_db.update_fields(req.game_id, compiled_style_card=card),
+                style_skill_id=active_style,
+                lang_skill_override=active_lang_ov,
+                bypass_global_tm=bool(req.bypass_global_tm),
+            )
+
+            all_tr = cache_db.get_all_translations(req.source_lang, req.target_lang)
+
+            def _do_backup(mod_files, created_files):
+                backup_mgr.backup_files(req.game_id, game["game_dir"], mod_files, created_files)
+
+            write_res = await asyncio.to_thread(
+                apply_slot_translations,
+                game["game_dir"],
+                entries,
+                all_tr,
+                slot_map[req.inject_slot],
+                _do_backup,
+                req.target_lang,
+                req.source_lang,
+            )
+
+            font_res = {"applied": False}
+            if req.patch_fonts:
+                font_res = await asyncio.to_thread(
+                    font_patcher.apply_font_patch,
+                    game["game_dir"],
+                    game["engine"],
+                    req.inject_slot,
+                    _do_backup,
+                )
+            if write_res.get("ok"):
+                await asyncio.to_thread(backup_mgr.record_patched_state, req.game_id, game["game_dir"])
+
+            resolved_sig = skill_manager.resolve_active_skills(
+                source_lang=req.source_lang,
+                target_lang=req.target_lang,
+                style_skill_id=active_style,
+                lang_skill_override=active_lang_ov,
+                source_lang_name=get_lang_display_name(req.source_lang),
+                target_lang_name=get_lang_display_name(req.target_lang),
+            ).get("skill_signature", "")
+
+            prog = res["progress"]
+            library_db.update_fields(
+                req.game_id,
+                total_strings=prog["total"],
+                translated_strings=prog["done"],
+                progress_pct=prog["pct"],
+                is_patched=1 if write_res.get("ok") else 0,
+                applied_skill_signature=resolved_sig,
+            )
+            _job_states[req.game_id] = {"status": "done"}
+            emit_sse(
+                "complete",
+                {
+                    "game_id": req.game_id,
+                    "progress": prog,
+                    "write_result": write_res,
+                    "font_result": font_res,
+                    "applied_skill_signature": resolved_sig,
+                    "backup_info": backup_mgr.get_backup_info(req.game_id, game["game_dir"]),
+                },
+            )
+        except Exception as exc:
+            logger.exception("Translation pipeline failed for %s", req.game_id)
+            _job_states[req.game_id] = {"status": "error", "error": str(exc)}
+            emit_sse("error", {"game_id": req.game_id, "message": str(exc)})
+        finally:
+            library_db.clear_job_journal(req.game_id)
+            try:
+                cache_db.checkpoint()
+            except Exception:
+                pass
+
+    asyncio.create_task(_worker())
+    return {"ok": True, "started": True, "game_id": req.game_id}
+
+
+@app.post("/api/translate/pause/{game_id}")
+async def api_translate_pause(game_id: str):
+    qwen_engine.pause_game(game_id)
+    emit_sse("paused", {"game_id": game_id, "paused": True})
+    return {"ok": True, "paused": True}
+
+
+@app.post("/api/translate/resume/{game_id}")
+async def api_translate_resume(game_id: str):
+    qwen_engine.resume_game(game_id)
+    emit_sse("paused", {"game_id": game_id, "paused": False})
+    return {"ok": True, "paused": False}
+
+
+# ---------------- Monitor, Glossary & Global TM ---------------- #
+
+@app.get("/api/games/{game_id}/monitor")
+async def api_game_monitor(game_id: str):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    src = game.get("source_lang") or "en"
+    tgt = game.get("target_lang") or "vi"
+    b_info = backup_mgr.get_backup_info(game_id, game.get("game_dir"))
+    pending_rows = cache_db.get_pending_strings(src, tgt)
+    if not pending_rows and game.get("detected_slots"):
+        slot_map = {s["slot_id"]: s for s in game["detected_slots"]}
+        if src in slot_map:
+            full_ext = await asyncio.to_thread(
+                backup_mgr.extract_entries_preferring_backup,
+                game_id,
+                game["game_dir"],
+                slot_map[src],
+                extract_slot_entries,
+                "FULL_PATCH",
+                True,
+            )
+            tm_hit_map = global_tm.lookup_exact_batch([e.text for e in full_ext["entries"]], src, tgt)
+            estimates = estimate_preset_durations(
+                full_ext["entries"],
+                set(tm_hit_map.keys()),
+                has_glossary=bool(cache_db.list_glossary_terms(src, tgt)),
+                profiler=hw_profiler,
+            )
+        else:
+            estimates = estimate_preset_durations([], set(), has_glossary=False, profiler=hw_profiler)
+    else:
+        tm_hit_map = global_tm.lookup_exact_batch([r["source_text"] for r in pending_rows if not r.get("num_map")], src, tgt)
+        estimates = estimate_preset_durations(
+            pending_rows,
+            set(tm_hit_map.keys()),
+            has_glossary=bool(cache_db.list_glossary_terms(src, tgt)),
+            profiler=hw_profiler,
+        )
+    dedup_summary = cache_db.get_dedup_summary(src, tgt)
+    return {
+        "recent_rows": cache_db.get_recent_translations(src, tgt, limit=100),
+        "glossary_terms": cache_db.list_glossary_terms(src, tgt),
+        "prethink": cache_db.get_latest_prethink(),
+        "progress": cache_db.get_progress(src, tgt),
+        "saved_translations": cache_db.list_saved_translations(),
+        "cache_db_path": str(cache_db.db_path),
+        "backup_info": b_info,
+        "estimates": estimates,
+        "stats": {**dedup_summary, "tm_hits": len(tm_hit_map)},
+        "shields": [
+            {
+                "id": "01",
+                "name": "01. Anti-Cheat Ban Protection",
+                "ok": game.get("anticheat_status") != "BLOCKED",
+                "detail": "Sạch chữ ký Anti-Cheat" if game.get("anticheat_status") != "BLOCKED" else f"Phát hiện: {', '.join(game.get('anticheat_vendors', []))}",
+            },
+            {
+                "id": "02",
+                "name": "02. Clean External Backup",
+                "ok": b_info.get("has_backup", False),
+                "detail": f"{b_info.get('file_count', 0)} file gốc được lưu tại backups/" if b_info.get("has_backup") else "Sẵn sàng sao lưu vi sai (không tạo rác trong thư mục game)",
+            },
+            {
+                "id": "03",
+                "name": "03. Native Slot Injection",
+                "ok": bool(game.get("detected_slots")),
+                "detail": f"Chèn an toàn vào slot [{game.get('inject_slot') or '--'}]",
+            },
+            {
+                "id": "04",
+                "name": "04. Tag Firewall __TAG_x__",
+                "ok": True,
+                "detail": "Khóa thẻ code + Retry temp=0.0 tối đa 2 lần",
+            },
+            {
+                "id": "05",
+                "name": "05. Encoding/BOM Guard",
+                "ok": True,
+                "detail": "charset-normalizer bảo toàn BOM/EOL & lọc <think>",
+            },
+            {
+                "id": "06",
+                "name": "06. 0GB VRAM Flush",
+                "ok": True,
+                "detail": "Tự xả GPU VRAM về 0GB trước khi mở game",
+            },
+        ],
+    }
+
+
+@app.get("/api/games/{game_id}/saved-translations")
+async def api_list_saved_translations(game_id: str):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    return {
+        "ok": True,
+        "cache_db_path": str(cache_db.db_path),
+        "saved_translations": cache_db.list_saved_translations(),
+    }
+
+
+@app.post("/api/games/{game_id}/saved-translations/apply")
+async def api_apply_saved_translation(game_id: str, req: ApplySavedTranslationRequest):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    if _job_states.get(game_id, {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="Tiến trình dịch cho game này đang chạy.")
+
+    ac_report = await asyncio.to_thread(scan_anticheat, game["game_dir"])
+    if ac_report["risk_level"] == "BLOCKED" and not req.force_offline_override:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "ANTICHEAT_BLOCKED",
+                "message": ac_report["message"],
+                "detected_ac": ac_report["detected_ac"],
+            },
+        )
+
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    all_tr = cache_db.get_all_translations(req.source_lang, req.target_lang)
+    if not all_tr:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Chưa có câu dịch nào cho cặp [{req.source_lang} -> {req.target_lang}] trong kho lưu.",
+        )
+
+    slots = game.get("detected_slots", [])
+    if not slots:
+        loc_report = await asyncio.to_thread(scan_game_languages, game["game_dir"])
+        slots = loc_report.get("slots", [])
+    slot_map = {s["slot_id"]: s for s in slots}
+    if req.source_lang not in slot_map:
+        raise HTTPException(status_code=400, detail=f"Không tìm thấy slot nguồn [{req.source_lang}] trong thư mục game.")
+
+    ranked = rank_inject_slots(slots, req.source_lang, req.target_lang)
+    inject_slot = req.inject_slot or game.get("inject_slot") or (ranked[0]["slot_id"] if ranked else req.source_lang)
+    if inject_slot not in slot_map:
+        inject_slot = ranked[0]["slot_id"] if ranked else req.source_lang
+
+    extracted = await asyncio.to_thread(
+        backup_mgr.extract_entries_preferring_backup,
+        game_id,
+        game["game_dir"],
+        slot_map[req.source_lang],
+        extract_slot_entries,
+        game.get("scope") or "FULL_PATCH",
+        True,
+    )
+    entries = extracted["entries"]
+
+    def _do_backup(mod_files, created_files):
+        backup_mgr.backup_files(game_id, game["game_dir"], mod_files, created_files)
+
+    write_res = await asyncio.to_thread(
+        apply_slot_translations,
+        game["game_dir"],
+        entries,
+        all_tr,
+        slot_map[inject_slot],
+        _do_backup,
+        req.target_lang,
+        req.source_lang,
+    )
+
+    font_res = {"applied": False}
+    if req.patch_fonts:
+        font_res = await asyncio.to_thread(
+            font_patcher.apply_font_patch,
+            game["game_dir"],
+            game["engine"],
+            inject_slot,
+            _do_backup,
+        )
+    if write_res.get("ok"):
+        await asyncio.to_thread(backup_mgr.record_patched_state, game_id, game["game_dir"])
+
+    prog = cache_db.get_progress(req.source_lang, req.target_lang)
+    updated = library_db.update_fields(
+        game_id,
+        source_lang=req.source_lang,
+        target_lang=req.target_lang,
+        inject_slot=inject_slot,
+        total_strings=prog["total"],
+        translated_strings=prog["done"],
+        progress_pct=prog["pct"],
+        is_patched=1 if write_res.get("ok") else game.get("is_patched", 0),
+    )
+    updated["ranked_slots"] = ranked
+    updated["has_backup"] = backup_mgr.has_backup(game_id, game["game_dir"])
+    updated["backup_info"] = backup_mgr.get_backup_info(game_id, game["game_dir"])
+    updated["cover_url"] = await _resolve_cover_url(updated)
+
+    emit_sse(
+        "saved_translation_applied",
+        {
+            "game_id": game_id,
+            "source_lang": req.source_lang,
+            "target_lang": req.target_lang,
+            "inject_slot": inject_slot,
+            "progress": prog,
+            "write_result": write_res,
+        },
+    )
+    return {
+        "ok": bool(write_res.get("ok")),
+        "game": updated,
+        "progress": prog,
+        "write_result": write_res,
+        "font_result": font_res,
+        "saved_translations": cache_db.list_saved_translations(),
+    }
+
+
+@app.delete("/api/games/{game_id}/saved-translations")
+async def api_delete_saved_translation(game_id: str, source_lang: str, target_lang: str):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if _job_states.get(game_id, {}).get("status") == "running" and game.get("source_lang") == source_lang and game.get("target_lang") == target_lang:
+        raise HTTPException(status_code=409, detail="Không thể xóa bản dịch đang chạy.")
+
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    deleted = cache_db.delete_saved_translations(source_lang, target_lang)
+    if game.get("source_lang") == source_lang and game.get("target_lang") == target_lang:
+        library_db.update_fields(game_id, translated_strings=0, progress_pct=0.0)
+    return {
+        "ok": True,
+        "deleted": deleted,
+        "saved_translations": cache_db.list_saved_translations(),
+    }
+
+
+@app.post("/api/games/{game_id}/edit-string")
+async def api_edit_single_string(game_id: str, req: EditTranslationRequest):
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    row = cache_db.update_single_translation(req.str_hash, req.translated_text)
+    if not row:
+        raise HTTPException(status_code=404, detail="String not found")
+    global_tm.upsert_batch([(row["source_text"], req.translated_text, row.get("category", "UI"))], row["source_lang"], row["target_lang"])
+    return {"ok": True, "row": row}
+
+
+@app.post("/api/games/{game_id}/glossary")
+async def api_add_glossary(game_id: str, req: GlossaryAddRequest):
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    cache_db.upsert_glossary_terms(
+        [{"source_term": req.source_term, "target_term": req.target_term, "note": req.note}],
+        req.source_lang,
+        req.target_lang,
+    )
+    return {"ok": True, "terms": cache_db.list_glossary_terms(req.source_lang, req.target_lang)}
+
+
+@app.delete("/api/games/{game_id}/glossary/{term_id}")
+async def api_delete_glossary(game_id: str, term_id: int):
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    cache_db.delete_glossary_term(term_id)
+    return {"ok": True}
+
+
+async def _hot_apply_cached_game(
+    game_id: str,
+    game: Dict[str, Any],
+    source_lang: Optional[str] = None,
+    target_lang: Optional[str] = None,
+    inject_slot_override: Optional[str] = None,
+    patch_fonts: bool = True,
+    force_offline_override: bool = False,
+) -> Dict[str, Any]:
+    """Shared helper to inject all DONE cached translations into game files & snapshot patched hashes."""
+    if _job_states.get(game_id, {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="Tiến trình cho game này đang chạy.")
+    ac_report = await asyncio.to_thread(scan_anticheat, game["game_dir"])
+    if ac_report["risk_level"] == "BLOCKED" and not force_offline_override:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "ANTICHEAT_BLOCKED",
+                "message": ac_report["message"],
+                "detected_ac": ac_report["detected_ac"],
+            },
+        )
+
+    src = source_lang or game.get("source_lang") or "en"
+    tgt = target_lang or game.get("target_lang") or "vi"
+    scope = game.get("scope") or "FULL_PATCH"
+
+    slots = game.get("detected_slots", [])
+    if not slots:
+        loc_report = await asyncio.to_thread(scan_game_languages, game["game_dir"])
+        slots = loc_report.get("slots", [])
+    slot_map = {s["slot_id"]: s for s in slots}
+    ranked = rank_inject_slots(slots, src, tgt)
+    inject_slot = inject_slot_override or game.get("inject_slot") or (ranked[0]["slot_id"] if ranked else src)
+    if inject_slot not in slot_map:
+        inject_slot = ranked[0]["slot_id"] if ranked else src
+
+    if src not in slot_map or inject_slot not in slot_map:
+        raise HTTPException(status_code=400, detail=f"Không tìm thấy slot [{src}] / [{inject_slot}] trong thư mục game.")
+
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    all_tr = cache_db.get_all_translations(src, tgt)
+    if not all_tr:
+        raise HTTPException(status_code=400, detail=f"Chưa có câu dịch nào cho cặp [{src} -> {tgt}].")
+
+    extracted = await asyncio.to_thread(
+        backup_mgr.extract_entries_preferring_backup,
+        game_id,
+        game["game_dir"],
+        slot_map[src],
+        extract_slot_entries,
+        scope,
+        True,
+    )
+    entries = extracted["entries"]
+
+    def _do_backup(mod_files, created_files):
+        backup_mgr.backup_files(game_id, game["game_dir"], mod_files, created_files)
+
+    write_res = await asyncio.to_thread(
+        apply_slot_translations,
+        game["game_dir"],
+        entries,
+        all_tr,
+        slot_map[inject_slot],
+        _do_backup,
+        tgt,
+        src,
+    )
+    font_res = {"applied": False}
+    if patch_fonts:
+        font_res = await asyncio.to_thread(
+            font_patcher.apply_font_patch,
+            game["game_dir"],
+            game["engine"],
+            inject_slot,
+            _do_backup,
+        )
+    if write_res.get("ok"):
+        await asyncio.to_thread(backup_mgr.record_patched_state, game_id, game["game_dir"])
+
+    prog = cache_db.get_progress(src, tgt)
+    updated = library_db.update_fields(
+        game_id,
+        source_lang=src,
+        target_lang=tgt,
+        inject_slot=inject_slot,
+        total_strings=prog["total"],
+        translated_strings=prog["done"],
+        progress_pct=prog["pct"],
+        is_patched=1 if write_res.get("ok") else game.get("is_patched", 0),
+    )
+    updated["ranked_slots"] = ranked
+    updated["has_backup"] = backup_mgr.has_backup(game_id, game["game_dir"])
+    updated["backup_info"] = backup_mgr.get_backup_info(game_id, game["game_dir"])
+    updated["cover_url"] = await _resolve_cover_url(updated)
+    _hydrate_saved_translation_flags(updated)
+    return {
+        "ok": bool(write_res.get("ok")),
+        "write_result": write_res,
+        "font_result": font_res,
+        "progress": prog,
+        "game": updated,
+    }
+
+
+@app.get("/api/games/{game_id}/strings/search")
+async def api_search_game_strings(game_id: str, q: str = "", filter: str = "ALL", limit: int = 200):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    src = game.get("source_lang") or "en"
+    tgt = game.get("target_lang") or "vi"
+    rows = await asyncio.to_thread(cache_db.search_translations, src, tgt, q, filter, limit)
+    return {"ok": True, "rows": rows, "total_returned": len(rows)}
+
+
+@app.post("/api/games/{game_id}/strings/bulk-replace")
+async def api_bulk_replace_strings(game_id: str, req: BulkReplaceRequest):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    src = game.get("source_lang") or "en"
+    tgt = game.get("target_lang") or "vi"
+    rep = await asyncio.to_thread(
+        cache_db.bulk_find_replace,
+        src,
+        tgt,
+        req.find_text,
+        req.replace_text,
+        req.case_sensitive,
+        req.category_filter,
+    )
+    if rep.get("updated_pairs"):
+        global_tm.upsert_batch(rep["updated_pairs"], src, tgt)
+
+    write_res = None
+    updated_game = game
+    hot_applied = False
+    if req.hot_apply and rep["replaced_count"] > 0:
+        applied = await _hot_apply_cached_game(game_id, game)
+        write_res = applied["write_result"]
+        updated_game = applied["game"]
+        hot_applied = bool(applied["ok"])
+
+    return {
+        "ok": True,
+        "replaced_count": rep["replaced_count"],
+        "hot_applied": hot_applied,
+        "write_result": write_res,
+        "game": updated_game,
+    }
+
+
+@app.post("/api/games/{game_id}/hot-apply")
+async def api_hot_apply_game(game_id: str):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    res = await _hot_apply_cached_game(game_id, game)
+    emit_sse("saved_translation_applied", {"game_id": game_id, **res})
+    return res
+
+
+@app.get("/api/games/{game_id}/sakugapack/export")
+async def api_export_sakugapack(game_id: str, source_lang: Optional[str] = None, target_lang: Optional[str] = None):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    src = source_lang or game.get("source_lang") or "en"
+    tgt = target_lang or game.get("target_lang") or "vi"
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    meta = {
+        "game_id": game_id,
+        "title": game.get("title") or game_id,
+        "engine": game.get("engine") or "",
+        "steam_appid": game.get("steam_appid") or "",
+        "style_skill_id": game.get("style_skill_id") or "natural_standard",
+    }
+    pack = await asyncio.to_thread(cache_db.export_sakugapack_data, src, tgt, meta)
+    if not pack.get("strings"):
+        raise HTTPException(status_code=400, detail=f"Chưa có câu dịch hoàn tất nào cho [{src} -> {tgt}] để xuất.")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("pack.json", json.dumps(pack, ensure_ascii=False, indent=2))
+    safe_slug = "".join(c if (c.isalnum() or c in "-_") else "_" for c in (game.get("title") or game_id))
+    fname = f"{safe_slug}_{src}_to_{tgt}.sakugapack"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.post("/api/games/{game_id}/sakugapack/import")
+async def api_import_sakugapack(game_id: str, req: SakugaPackImportRequest):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if _job_states.get(game_id, {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="Tiến trình cho game này đang chạy.")
+
+    b64_data = req.content_b64.split(",", 1)[1] if "," in req.content_b64 else req.content_b64
+    try:
+        raw_bytes = base64.b64decode(b64_data)
+        if raw_bytes[:2] == b"PK":
+            with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as zf:
+                target_name = "pack.json" if "pack.json" in zf.namelist() else next(
+                    (n for n in zf.namelist() if n.endswith(".json")), ""
+                )
+                if not target_name:
+                    raise ValueError("File .sakugapack không chứa pack.json.")
+                pack = json.loads(zf.read(target_name).decode("utf-8"))
+        else:
+            pack = json.loads(raw_bytes.decode("utf-8"))
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Không đọc được file .sakugapack: {exc}")
+
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    try:
+        imp = await asyncio.to_thread(cache_db.import_sakugapack_data, pack, False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    src = imp["source_lang"]
+    tgt = imp["target_lang"]
+    tm_rows = [
+        (str(it.get("source_text") or ""), str(it.get("translated_text") or ""), str(it.get("category") or "UI"))
+        for it in (pack.get("strings") or [])
+        if isinstance(it, dict) and it.get("source_text") and it.get("translated_text") and str(it.get("num_map_json") or "{}") == "{}"
+    ]
+    if tm_rows:
+        global_tm.upsert_batch(tm_rows, src, tgt)
+
+    write_res = None
+    if req.auto_apply:
+        applied = await _hot_apply_cached_game(
+            game_id,
+            game,
+            source_lang=src,
+            target_lang=tgt,
+            inject_slot_override=req.inject_slot,
+        )
+        write_res = applied["write_result"]
+        updated = applied["game"]
+        prog = applied["progress"]
+    else:
+        prog = cache_db.get_progress(src, tgt)
+        updated = library_db.update_fields(
+            game_id,
+            source_lang=src,
+            target_lang=tgt,
+            total_strings=prog["total"],
+            translated_strings=prog["done"],
+            progress_pct=prog["pct"],
+        )
+        _hydrate_saved_translation_flags(updated)
+
+    emit_sse("saved_translation_applied", {"game_id": game_id, "source_lang": src, "target_lang": tgt})
+    return {
+        "ok": True,
+        **imp,
+        "progress": prog,
+        "write_result": write_res,
+        "saved_translations": cache_db.list_saved_translations(),
+        "game": updated,
+    }
+
+
+@app.post("/api/games/{game_id}/delta-update")
+async def api_delta_update_game(game_id: str):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if _job_states.get(game_id, {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="Tiến trình cho game này đang chạy.")
+
+    src = game.get("source_lang") or "en"
+    tgt = game.get("target_lang") or "vi"
+    scope = game.get("scope") or "FULL_PATCH"
+
+    watch = await asyncio.to_thread(
+        backup_mgr.check_game_update_status,
+        game_id,
+        game["game_dir"],
+        bool(game.get("is_patched")),
+    )
+    if watch.get("updated_files"):
+        await asyncio.to_thread(
+            backup_mgr.refresh_baseline_for_updated_files,
+            game_id,
+            game["game_dir"],
+            watch["updated_files"],
+        )
+
+    loc_report = await asyncio.to_thread(scan_game_languages, game["game_dir"])
+    slots = loc_report.get("slots", []) or game.get("detected_slots", [])
+    slot_map = {s["slot_id"]: s for s in slots}
+    ranked = rank_inject_slots(slots, src, tgt)
+    inject_slot = game.get("inject_slot") or (ranked[0]["slot_id"] if ranked else src)
+    if inject_slot not in slot_map:
+        inject_slot = ranked[0]["slot_id"] if ranked else src
+
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    write_res: Dict[str, Any] = {"ok": False, "updated": 0}
+    if src in slot_map and inject_slot in slot_map:
+        extracted = await asyncio.to_thread(
+            backup_mgr.extract_entries_preferring_backup,
+            game_id,
+            game["game_dir"],
+            slot_map[src],
+            extract_slot_entries,
+            scope,
+            True,
+        )
+        entries = extracted.get("entries", [])
+        cache_db.store_extracted_entries(entries, src, tgt, mask_tags)
+        all_tr = cache_db.get_all_translations(src, tgt)
+
+        def _do_backup(mod_files, created_files):
+            backup_mgr.backup_files(game_id, game["game_dir"], mod_files, created_files)
+
+        if all_tr and entries:
+            write_res = await asyncio.to_thread(
+                apply_slot_translations,
+                game["game_dir"],
+                entries,
+                all_tr,
+                slot_map[inject_slot],
+                _do_backup,
+                tgt,
+                src,
+            )
+            if write_res.get("ok"):
+                await asyncio.to_thread(backup_mgr.record_patched_state, game_id, game["game_dir"])
+
+    prog = cache_db.get_progress(src, tgt)
+    updated = library_db.update_fields(
+        game_id,
+        detected_slots_json=json.dumps(slots, ensure_ascii=False),
+        total_strings=prog["total"],
+        translated_strings=prog["done"],
+        progress_pct=prog["pct"],
+        is_patched=1 if write_res.get("ok") else game.get("is_patched", 0),
+    )
+    updated["ranked_slots"] = ranked
+    updated["has_backup"] = backup_mgr.has_backup(game_id, game["game_dir"])
+    updated["backup_info"] = backup_mgr.get_backup_info(game_id, game["game_dir"])
+    updated["cover_url"] = await _resolve_cover_url(updated)
+    _hydrate_saved_translation_flags(updated)
+    return {
+        "ok": True,
+        "state": watch.get("state", "OK"),
+        "total": prog["total"],
+        "done": prog["done"],
+        "pending_new": max(0, int(prog["total"]) - int(prog["done"])),
+        "write_result": write_res,
+        "game": updated,
+    }
+
+
+@app.get("/api/tm")
+async def api_list_tm(q: str = "", limit: int = 120):
+    return {"entries": global_tm.search_tm(q, limit=limit), "stats": global_tm.stats()}
+
+
+@app.delete("/api/tm/{entry_id}")
+async def api_delete_tm(entry_id: int):
+    global_tm.delete_entry(entry_id)
+    return {"ok": True}
+
+
+# ---------------- Hardware Profiler, Ollama Models & 2-Layer Skill Hub ---------------- #
+
+@app.get("/api/system/hardware")
+async def api_system_hardware():
+    hw_eff, ollama_st = await asyncio.gather(
+        asyncio.to_thread(hw_profiler.get_effective_settings),
+        qwen_engine.check_ollama_status(),
+    )
+    return {"ok": True, "hardware": hw_eff, "ollama": ollama_st}
+
+
+@app.post("/api/system/settings")
+async def api_save_system_settings(req: HardwareSettingsRequest):
+    updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    hw_profiler.save_settings(updates)
+    hw_profiler.apply_ollama_env()
+    hw_eff, ollama_st = await asyncio.gather(
+        asyncio.to_thread(hw_profiler.get_effective_settings),
+        qwen_engine.check_ollama_status(),
+    )
+    telemetry = await asyncio.to_thread(qwen_engine.get_telemetry)
+    return {"ok": True, "hardware": hw_eff, "ollama": ollama_st, "telemetry": telemetry}
+
+
+@app.get("/api/ollama/models")
+async def api_ollama_models():
+    status = await qwen_engine.check_ollama_status()
+    return {"ok": True, **status}
+
+
+@app.post("/api/ollama/pull")
+async def api_ollama_pull(req: PullModelRequest):
+    model = (req.model or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Tên model không được để trống.")
+    try:
+        res = await qwen_engine.pull_model_stream(
+            model,
+            progress_cb=lambda p: emit_sse("ollama_pull_progress", p),
+        )
+        status = await qwen_engine.check_ollama_status()
+        emit_sse("ollama_pull_progress", {"model": model, "status": "success", "pct": 100.0, "done": True})
+        return {"ok": True, **res, "ollama": status}
+    except Exception as exc:
+        emit_sse("ollama_pull_progress", {"model": model, "status": "error", "error": str(exc), "done": True})
+        raise HTTPException(status_code=500, detail=f"Lỗi tải model {model}: {exc}")
+
+
+@app.get("/api/skills")
+async def api_list_skills(
+    source_lang: Optional[str] = None,
+    target_lang: Optional[str] = None,
+    style_skill_id: Optional[str] = None,
+    lang_skill_override: str = "auto",
+):
+    listing = skill_manager.list_skills()
+    active_resolved = None
+    if source_lang and target_lang:
+        active_resolved = skill_manager.resolve_active_skills(
+            source_lang=source_lang,
+            target_lang=target_lang,
+            style_skill_id=style_skill_id or "natural_standard",
+            lang_skill_override=lang_skill_override or "auto",
+            source_lang_name=get_lang_display_name(source_lang),
+            target_lang_name=get_lang_display_name(target_lang),
+        )
+    return {
+        "ok": True,
+        **listing,
+        "skills_dir": str(skill_manager.skills_dir),
+        "active_resolved": active_resolved,
+    }
+
+
+@app.post("/api/skills")
+async def api_save_skill(req: SaveSkillRequest):
+    try:
+        data = req.model_dump()
+        if not (data.get("rules_text") or "").strip():
+            raw_r = data.get("rules")
+            if isinstance(raw_r, list):
+                data["rules_text"] = "\n".join(str(x).strip() for x in raw_r if str(x).strip())
+            elif isinstance(raw_r, str):
+                data["rules_text"] = raw_r
+        if not data.get("source_langs") or not data.get("target_langs"):
+            pair = (data.get("language_pair") or "").strip()
+            if "->" in pair:
+                p_src, p_tgt = [x.strip() or "*" for x in pair.split("->", 1)]
+                data["source_langs"] = data.get("source_langs") or (["*"] if p_src.lower() == "any" else [x.strip() for x in p_src.split(",") if x.strip()])
+                data["target_langs"] = data.get("target_langs") or (["*"] if p_tgt.lower() == "any" else [x.strip() for x in p_tgt.split(",") if x.strip()])
+            else:
+                s1 = (data.get("source_lang") or "any").strip()
+                t1 = (data.get("target_lang") or "any").strip()
+                data["source_langs"] = data.get("source_langs") or (["*"] if s1.lower() in ("any", "*") else [s1])
+                data["target_langs"] = data.get("target_langs") or (["*"] if t1.lower() in ("any", "*") else [t1])
+        saved = skill_manager.save_skill(req.layer, data)
+        return {"ok": True, "skill": saved}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/skills/{layer}/{skill_id}")
+async def api_delete_skill(layer: str, skill_id: str):
+    try:
+        skill_manager.delete_skill(layer, skill_id)
+        return {"ok": True}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/skills/import")
+async def api_import_skill(req: ImportSkillRequest):
+    try:
+        if req.content_b64:
+            raw_bytes = base64.b64decode(req.content_b64.split(",")[-1])
+        elif req.raw_text is not None:
+            raw_bytes = req.raw_text.encode("utf-8")
+        else:
+            raise ValueError("Thiếu nội dung file skill để nhập.")
+        imp_res = skill_manager.import_skill(req.filename or "imported_skill.md", raw_bytes)
+        return {
+            "ok": True,
+            "skill": imp_res["skill"],
+            "glossary_rows": imp_res.get("glossary_rows", []),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Lỗi nhập Skill: {exc}")
+
+
+@app.get("/api/skills/export/{layer}/{skill_id}")
+async def api_export_skill(layer: str, skill_id: str, fmt: str = "md", game_id: Optional[str] = None):
+    glossary_rows: Optional[List[Dict[str, str]]] = None
+    if game_id:
+        game = library_db.get_game(game_id)
+        if game:
+            cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+            glossary_rows = cache_db.list_glossary_terms(
+                game.get("source_lang") or "en",
+                game.get("target_lang") or "vi",
+            )
+    try:
+        fname, mime, raw_bytes = skill_manager.export_skill(
+            layer, skill_id, fmt=fmt, glossary_rows=glossary_rows
+        )
+        return Response(
+            content=raw_bytes,
+            media_type=mime,
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Lỗi xuất Skill: {exc}")
+
+
+@app.post("/api/skills/ai-generate")
+async def api_ai_generate_skill(req: AiSkillGenRequest):
+    idea = (req.idea or "").strip()
+    if not idea:
+        raise HTTPException(status_code=400, detail="Hãy mô tả ý tưởng phong cách dịch (tối thiểu 1 câu).")
+    src_name = get_lang_display_name(req.source_lang)
+    tgt_name = get_lang_display_name(req.target_lang)
+    sys_p, user_p = build_ai_skill_gen_prompt(idea, src_name, tgt_name, layer=req.layer)
+
+    raw_out = ""
+    used_ai = False
+    try:
+        ollama_st = await qwen_engine.check_ollama_status()
+        if ollama_st.get("online"):
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                raw_out, _th, _tok, _el = await qwen_engine._call_ollama_chat(
+                    client, sys_p, user_p, think=False, temperature=0.35, num_predict=650
+                )
+            used_ai = bool(raw_out.strip())
+    except Exception as exc:
+        logger.warning("AI skill generation fallback to structured draft: %s", exc)
+
+    parsed = parse_ai_generated_skill(raw_out, idea, layer=req.layer)
+    if req.layer == "languages":
+        parsed["language_pair"] = f"{req.source_lang}->{req.target_lang}"
+        parsed["source_lang"] = req.source_lang
+        parsed["target_lang"] = req.target_lang
+
+    if req.auto_save:
+        saved = skill_manager.save_skill(req.layer, parsed)
+        return {"ok": True, "skill": saved, "used_ai": used_ai}
+    return {"ok": True, "skill": parsed, "used_ai": used_ai}
+
+
+@app.post("/api/skills/open-folder")
+async def api_open_skills_folder():
+    target_dir = skill_manager.skills_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        os.startfile(str(target_dir))
+    else:
+        subprocess.Popen(["xdg-open" if sys.platform.startswith("linux") else "open", str(target_dir)])
+    return {"ok": True, "path": str(target_dir)}
+
+
+@app.post("/api/games/{game_id}/reapply-skill")
+async def api_reapply_skill(game_id: str, req: ReapplySkillRequest):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if _job_states.get(game_id, {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="Tiến trình cho game này đang chạy.")
+
+    src = game.get("source_lang") or "en"
+    tgt = game.get("target_lang") or "vi"
+    inject_slot = game.get("inject_slot") or src
+    eff_style = (req.style_skill_id or "").strip() or (game.get("style_skill_id") or game.get("tone_preset") or "natural_standard")
+    eff_lang_ov = (req.lang_skill_override or "").strip() or (game.get("lang_skill_override") or "auto")
+
+    library_db.update_fields(
+        game_id,
+        style_skill_id=eff_style,
+        tone_preset=eff_style,
+        lang_skill_override=eff_lang_ov,
+        compiled_style_card="",
+    )
+
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    reset_cnt = cache_db.reset_for_reapply_skill(
+        src,
+        tgt,
+        scope=req.scope,
+        keep_manual_locked=bool(req.keep_manual_locked),
+    )
+    prog = cache_db.get_progress(src, tgt)
+    library_db.update_fields(
+        game_id,
+        total_strings=prog["total"],
+        translated_strings=prog["done"],
+        progress_pct=prog["pct"],
+    )
+
+    started_job = False
+    if req.auto_start and reset_cnt > 0:
+        await api_translate_start(
+            StartTranslateRequest(
+                game_id=game_id,
+                source_lang=src,
+                target_lang=tgt,
+                inject_slot=inject_slot,
+                scope=game.get("scope") or "FULL_PATCH",
+                patch_fonts=True,
+                style_skill_id=eff_style,
+                lang_skill_override=eff_lang_ov,
+                bypass_global_tm=True,
+            )
+        )
+        started_job = True
+
+    fresh = library_db.get_game(game_id) or game
+    _hydrate_saved_translation_flags(fresh)
+    return {
+        "ok": True,
+        "reset_count": reset_cnt,
+        "started": started_job,
+        "progress": prog,
+        "game": fresh,
+    }
+
+
+# ---------------- PyWebView Native Pickers & SSE ---------------- #
+
+@app.post("/api/ui/pick-folder")
+async def api_pick_folder():
+    if _wv_window is None:
+        return {"path": ""}
+    import webview
+    res = _wv_window.create_file_dialog(webview.FOLDER_DIALOG)
+    return {"path": res[0] if res else ""}
+
+
+@app.post("/api/ui/pick-file")
+async def api_pick_file():
+    if _wv_window is None:
+        return {"path": ""}
+    import webview
+    res = _wv_window.create_file_dialog(
+        webview.OPEN_DIALOG,
+        file_types=("Game Shortcuts & EXEs (*.url;*.lnk;*.exe)", "All files (*.*)"),
+    )
+    return {"path": res[0] if res else ""}
+
+
+@app.get("/api/events")
+async def api_events():
+    q: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _sse_queues.add(q)
+
+    async def event_stream():
+        try:
+            init_tele = await asyncio.to_thread(qwen_engine.get_telemetry)
+            yield f"data: {json.dumps({'event': 'connected', 'data': {'ts': time.time(), 'telemetry': init_tele}})}\n\n"
+            while True:
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=3.0)
+                    yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    tele = await asyncio.to_thread(qwen_engine.get_telemetry)
+                    yield f"data: {json.dumps({'event': 'ping', 'data': {'telemetry': tele}})}\n\n"
+        finally:
+            _sse_queues.discard(q)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+def _find_free_port(start: int = 8765) -> int:
+    import socket
+    for port in range(start, start + 30):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    return start
+
+
+def _probe_and_activate_port(port: int, timeout: float = 0.7) -> Optional[Dict[str, Any]]:
+    import urllib.request
+    base = f"http://127.0.0.1:{int(port)}"
+    try:
+        with urllib.request.urlopen(f"{base}/api/ui/identity", timeout=timeout) as resp:
+            ident = json.loads(resp.read().decode("utf-8"))
+        if ident.get("app") != _APP_IDENTITY:
+            return None
+        req = urllib.request.Request(f"{base}/api/ui/activate", data=b"{}", method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=timeout) as act_resp:
+            act_data = json.loads(act_resp.read().decode("utf-8"))
+        act_data["port"] = int(port)
+        return act_data
+    except Exception:
+        return None
+
+
+def _activate_existing_instance(
+    lock_path: Path = _INSTANCE_LOCK_PATH,
+    wait_for_lock: bool = True,
+) -> Optional[Dict[str, Any]]:
+    attempts = 8 if wait_for_lock else 1
+    for idx in range(attempts):
+        if lock_path.exists():
+            try:
+                lock_data = json.loads(lock_path.read_text(encoding="utf-8"))
+                port = int(lock_data.get("port") or 0)
+                if port > 0:
+                    res = _probe_and_activate_port(port)
+                    if res:
+                        return res
+            except Exception:
+                pass
+        if idx < attempts - 1:
+            time.sleep(0.15)
+    for port in range(8765, 8795):
+        res = _probe_and_activate_port(port, timeout=0.25)
+        if res:
+            return res
+    return None
+
+
+def acquire_single_instance_lock(
+    lock_path: Path = _INSTANCE_LOCK_PATH,
+    mutex_name: str = _SINGLE_INSTANCE_MUTEX_NAME,
+) -> tuple[bool, Optional[int], Optional[Dict[str, Any]]]:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.CreateMutexW(None, False, str(mutex_name))
+        err = int(ctypes.get_last_error())
+        if err == 183:  # ERROR_ALREADY_EXISTS
+            if handle:
+                try:
+                    kernel32.CloseHandle(handle)
+                except Exception:
+                    pass
+            existing = _activate_existing_instance(lock_path=lock_path, wait_for_lock=True)
+            return False, None, existing
+        if handle:
+            return True, int(handle), None
+
+    if lock_path.exists():
+        existing = _activate_existing_instance(lock_path=lock_path, wait_for_lock=False)
+        if existing:
+            return False, None, existing
+    return True, None, None
+
+
+def write_instance_lock(port: int, lock_path: Path = _INSTANCE_LOCK_PATH) -> None:
+    payload = {
+        "app": _APP_IDENTITY,
+        "pid": os.getpid(),
+        "port": int(port),
+        "started_at": time.time(),
+    }
+    atomic_write_text(lock_path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def release_single_instance_lock(
+    handle: Optional[int],
+    lock_path: Path = _INSTANCE_LOCK_PATH,
+) -> None:
+    try:
+        if lock_path.exists():
+            data = json.loads(lock_path.read_text(encoding="utf-8"))
+            if int(data.get("pid") or -1) == os.getpid():
+                lock_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    if handle and os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.CloseHandle(wintypes.HANDLE(int(handle)))
+        except Exception:
+            pass
+
+
+def main() -> None:
+    global _wv_window, _tray_controller, _force_app_exit, _instance_mutex_handle
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Black Sakura Translate — Local AI Game Localization Launcher")
+    parser.add_argument("--web", action="store_true", help="Chạy trên trình duyệt mặc định thay vì cửa sổ Desktop PyWebView")
+    parser.add_argument("--port", type=int, default=8765, help="Cổng ưu tiên cho máy chủ cục bộ (mặc định: 8765)")
+    args, _ = parser.parse_known_args()
+
+    acquired, mutex_handle, existing = acquire_single_instance_lock()
+    if not acquired:
+        logger.info("Black Sakura Translate already running (existing=%s); activated existing window and exiting.", existing)
+        return
+    _instance_mutex_handle = mutex_handle
+
+    port = _find_free_port(max(1024, int(args.port)))
+    url = f"http://127.0.0.1:{port}"
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+
+    # Wait briefly for uvicorn socket
+    for _ in range(30):
+        import urllib.request
+        try:
+            urllib.request.urlopen(f"{url}/api/tools/status", timeout=0.5)
+            break
+        except Exception:
+            time.sleep(0.1)
+
+    write_instance_lock(port)
+
+    def _run_browser_fallback() -> None:
+        import webbrowser
+
+        logger.info("Black Sakura Translate running in Web mode at %s (Press Ctrl+C to stop).", url)
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        try:
+            while t.is_alive():
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+
+    if args.web:
+        try:
+            _run_browser_fallback()
+        finally:
+            server.should_exit = True
+            release_single_instance_lock(_instance_mutex_handle)
+            _instance_mutex_handle = None
+        return
+
+    try:
+        import webview
+        from webview.dom import DOMEventHandler
+    except Exception as exc:
+        logger.warning("PyWebView không khả dụng (%s); tự động chuyển sang chế độ trình duyệt.", exc)
+        try:
+            _run_browser_fallback()
+        finally:
+            server.should_exit = True
+            release_single_instance_lock(_instance_mutex_handle)
+            _instance_mutex_handle = None
+        return
+
+    _wv_window = webview.create_window(
+        _APP_TITLE,
+        url=url,
+        width=1400,
+        height=880,
+        min_size=(1120, 720),
+        background_color="#0B0B0E",
+    )
+
+    def _request_full_exit() -> None:
+        global _force_app_exit
+        if _any_job_running() and os.name == "nt":
+            try:
+                import ctypes
+                ans = ctypes.windll.user32.MessageBoxW(
+                    0,
+                    "Đang có tiến trình Dịch hoặc Fix lỗi đang chạy ngầm!\n"
+                    "Nếu thoát hẳn lúc này, các câu đã dịch đã được lưu an toàn trong SQLite để lần sau mở app tự động chạy tiếp.\n\n"
+                    "Bạn có chắc chắn muốn thoát hẳn?",
+                    "Black Sakura Translate // Cảnh báo tiến trình đang chạy",
+                    0x00000004 | 0x00000030,  # MB_YESNO | MB_ICONWARNING
+                )
+                if ans != 6:  # IDYES
+                    return
+            except Exception:
+                pass
+        _force_app_exit = True
+        if _tray_controller is not None:
+            _tray_controller.stop()
+        if _wv_window is not None:
+            try:
+                _wv_window.destroy()
+            except Exception:
+                pass
+
+    ico_path = APP_DIR / "sakuga_icon.ico"
+    _tray_controller = WinSystemTray(
+        icon_path=ico_path,
+        tooltip="Black Sakura Translate",
+        on_open=_restore_window_from_tray,
+        on_hide=lambda: _hide_window_to_tray(True),
+        on_exit=_request_full_exit,
+        is_busy_fn=_any_job_running,
+    )
+    _tray_controller.start()
+
+    def _on_closing():
+        if _force_app_exit:
+            return True
+        min_pref = library_db.get_setting("minimize_to_tray", "1") == "1"
+        if _any_job_running() or min_pref:
+            threading.Thread(target=lambda: _hide_window_to_tray(True), daemon=True).start()
+            return False
+        return True
+
+    def _on_minimized():
+        if library_db.get_setting("minimize_to_tray", "1") == "1":
+            threading.Thread(target=lambda: _hide_window_to_tray(True), daemon=True).start()
+
+    def _on_loaded():
+        def _on_drop(e):
+            files = e.get("dataTransfer", {}).get("files", [])
+            paths = [f.get("pywebviewFullPath") for f in files if f.get("pywebviewFullPath")]
+            if paths and _wv_window:
+                _wv_window.evaluate_js(f"window.onSakugaNativeDrop && window.onSakugaNativeDrop({json.dumps(paths)})")
+
+        try:
+            _wv_window.dom.document.events.drop += DOMEventHandler(_on_drop, prevent_default=True, stop_propagation=True)
+        except Exception as exc:
+            logger.debug("DOM drop hook warning: %s", exc)
+
+    _wv_window.events.closing += _on_closing
+    _wv_window.events.minimized += _on_minimized
+    _wv_window.events.loaded += _on_loaded
+    try:
+        webview.start(debug=False, icon=str(ico_path) if ico_path.exists() else None)
+    finally:
+        if _tray_controller is not None:
+            _tray_controller.stop()
+        server.should_exit = True
+        release_single_instance_lock(_instance_mutex_handle)
+        _instance_mutex_handle = None
+
+
+if __name__ == "__main__":
+    main()

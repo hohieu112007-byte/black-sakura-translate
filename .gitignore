@@ -1,0 +1,46 @@
+# Python bytecode & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# User runtime databases, covers, caches & local settings
+library.db
+library.db-journal
+library.db-wal
+library.db-shm
+global_tm.db
+global_tm.db-journal
+global_tm.db-wal
+global_tm.db-shm
+settings.json
+.instance_lock.json
+cache/
+covers/
+backups/
+
+# Auto-bootstrapped third-party binaries & fonts (downloaded on first run)
+tools/repak/
+tools/unreallocres/
+tools/fonts/
+tools/rpatool.py
+tools/__pycache__/
+
+# OS, IDE, shortcuts & temporary files
+*.sakuga_tmp
+*.log
+*.lnk
+.DS_Store
+Thumbs.db
+.env
+.vscode/
+.idea/
+.sentry-native/
+.playwright-mcp/
+Launch_Sakuga_Launcher.bat

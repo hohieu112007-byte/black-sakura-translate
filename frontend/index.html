@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="vi" data-theme="mono-ink">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Black Sakura Translate</title>
+  <link rel="icon" href="/favicon.ico" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:ital,wght@0,400;0,500;0,600;0,700;0,800;1,700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/studio_style.css" />
+  <script src="/static/sakuga_vfx/button.js"></script>
+  <script src="/static/sakuga_vfx/slider.js"></script>
+  <script src="/static/sakuga_vfx/checkbox.js"></script>
+  <script src="/static/sakuga_vfx/toggle.js"></script>
+  <script src="/static/sakuga_vfx/progress.js"></script>
+  <script src="/static/sakuga_vfx/input.js"></script>
+  <script src="/static/sakuga_vfx/tooltip.js"></script>
+  <script src="/static/sakuga_vfx/toast.js"></script>
+</head>
+<body>
+  <!-- Global Drag & Drop Blur Overlay -->
+  <div id="globalDropOverlay" class="drop-overlay hidden">
+    <div class="drop-overlay-card">
+      <div class="drop-icon">+</div>
+      <h2>THẢ THƯ MỤC GAME HOẶC SHORTCUT VÀO ĐÂY</h2>
+      <p>Thư mục Game • Steam (.url) • Windows (.lnk) • Thực thi (.exe)</p>
+    </div>
+  </div>
+
+  <!-- Steam-Style Top Window Bar (46px) -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="brand">
+        <span class="brand-mark">BLACK SAKURA</span>
+        <span class="brand-slash">//</span>
+        <span class="brand-sub">TRANSLATE</span>
+      </div>
+      <nav class="top-links" aria-label="Điều hướng chính">
+        <button id="navHomeGridBtn" class="top-link" data-view="home">Thư viện</button>
+        <span class="top-crumb-sep" aria-hidden="true">▸</span>
+        <button id="navGameDetailBtn" class="top-link active" data-view="game">Trang Game</button>
+        <span class="top-links-divider" aria-hidden="true"></span>
+        <button id="navToolsBtn" class="top-link" data-view="tools">Kho Skill &amp; Global TM</button>
+      </nav>
+    </div>
+
+    <div class="topbar-right">
+      <div id="ollamaStatusPill" class="status-pill clickable-pill" role="button" tabindex="0" title="Bấm để chọn Model AI Local &amp; cấu hình phần cứng (Ollama)">
+        <span class="dot dot-muted" id="ollamaStatusDot"></span>
+        <span id="ollamaStatusText">Ollama...</span>
+      </div>
+      <div id="toolsStatusPill" class="status-pill">
+        <span class="dot dot-muted" id="toolsStatusDot"></span>
+        <span id="toolsStatusText">Tools...</span>
+      </div>
+      <div class="theme-switcher" title="Đổi màu giao diện (5 Theme)">
+        <button class="swatch active" data-theme-pick="mono-ink" title="Trắng Đen (Mặc định)" style="--sw-a:#FFFFFF;--sw-b:#09090B"></button>
+        <button class="swatch" data-theme-pick="obsidian" title="Obsidian Đêm" style="--sw-a:#14141A;--sw-b:#E4E4E7"></button>
+        <button class="swatch" data-theme-pick="sakuga-indigo" title="Sakuga Indigo" style="--sw-a:#F4F3FC;--sw-b:#FF5FA8"></button>
+        <button class="swatch" data-theme-pick="cyber-ice" title="Cyber Ice" style="--sw-a:#EBF4FA;--sw-b:#0284C7"></button>
+        <button class="swatch" data-theme-pick="amber-ink" title="Amber Paper" style="--sw-a:#FBF8F1;--sw-b:#D97706"></button>
+      </div>
+      <button id="btnHideToTray" class="btn btn-ghost btn-sm" title="Thu gọn cửa sổ xuống khay hệ thống (vẫn tiếp tục chạy ngầm)">▾ Ẩn khay</button>
+    </div>
+  </header>
+
+  <sakuga-toast id="sakugaToast" style="position: fixed; right: 20px; bottom: 68px; z-index: 600;"></sakuga-toast>
+  <div id="toastStack" class="toast-stack"></div>
+
+  <!-- ==================== STEAM SHELL: LEFT SIDEBAR + RIGHT STAGE ==================== -->
+  <div class="steam-shell">
+    <!-- LEFT PERSISTENT GAME LIST SIDEBAR -->
+    <aside class="steam-sidebar">
+      <div class="sidebar-head">
+        <button id="btnSidebarHome" class="sidebar-home-btn" title="Xem toàn bộ lưới ảnh bìa">
+          <span>⌂ Trang chủ Thư viện</span>
+          <span class="mono-mini" id="sidebarGameCount">0</span>
+        </button>
+        <button id="btnOpenAddModal" class="btn-square" title="Thêm Game / Shortcut">+</button>
+      </div>
+
+      <div class="sidebar-search">
+        <sakuga-input id="globalSearchInput" label="Tìm game" placeholder="Tìm tên game..."></sakuga-input>
+      </div>
+
+      <div class="sidebar-filters">
+        <button class="sb-pill active" data-filter="all">Tất cả</button>
+        <button class="sb-pill" data-filter="done">Đã dịch</button>
+        <button class="sb-pill" data-filter="steam">Steam</button>
+      </div>
+
+      <div id="sidebarGameList" class="sidebar-game-list">
+        <!-- Populated dynamically -->
+      </div>
+
+      <div class="sidebar-foot">
+        <button id="btnDiscoverSteam" class="btn btn-ghost btn-sm" style="width:100%;">↻ Quét Steam Library</button>
+      </div>
+    </aside>
+
+    <!-- RIGHT MAIN WORKSPACE STAGE -->
+    <main class="steam-main">
+      <div id="ambientGameBackdrop" class="ambient-backdrop"></div>
+      <!-- VIEW A: STEAM HOME (2:3 COVER POSTER SHELF) -->
+      <section id="viewHome" class="main-view">
+        <div class="home-header">
+          <div>
+            <h1>Thư viện Game của bạn</h1>
+            <p class="mono-sub">Bấm vào bìa game để mở trang điều khiển &amp; dịch nhanh</p>
+          </div>
+        </div>
+        <div id="posterGrid" class="poster-grid"></div>
+      </section>
+
+      <!-- VIEW B: STEAM GAME PAGE (DEFAULT MINIMALIST VIEW + EXPANDABLE SETTINGS) -->
+      <section id="viewGame" class="main-view active">
+        <!-- Steam Hero Header Banner -->
+        <div class="steam-hero">
+          <div id="heroBgImage" class="hero-bg-image"></div>
+          <div class="hero-scrim"></div>
+          <div class="hero-inner">
+            <div class="hero-thumb-frame" id="heroPosterThumb"></div>
+            <div class="hero-meta">
+              <div class="hero-badges">
+                <span id="heroLaunchBadge" class="badge badge-mono">READY</span>
+                <span id="heroEngineBadge" class="badge">--</span>
+                <span id="heroAcBadge" class="badge badge-safe">SAFE</span>
+              </div>
+              <h1 id="heroTitle" class="hero-title">Chọn một game từ danh sách bên trái</h1>
+              <p id="heroSubtitle" class="hero-subtitle">Thêm thư mục game hoặc import trực tiếp từ Steam để bắt đầu.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Anti-Cheat Alert Banner (only when BLOCKED) -->
+        <div id="studioAcBanner" class="ac-banner hidden">
+          <div class="ac-banner-text">
+            <strong>PHÁT HIỆN ANTI-CHEAT • KHÓA BẢO VỆ TÀI KHOẢN</strong>
+            <p id="studioAcDesc"></p>
+          </div>
+          <sakuga-checkbox id="chkOfflineOverride">Mở khóa Offline Override (chỉ dùng cho chế độ Offline)</sakuga-checkbox>
+        </div>
+
+        <!-- Steam Action Bar (PLAY + QUICK TRANSLATE + PACK STATUS + ACTIONS) -->
+        <div class="steam-action-strip">
+          <div class="action-strip-left">
+            <sakuga-button id="btnHeroPlay" disabled>▶ CHƠI NGAY</sakuga-button>
+            <sakuga-button id="btnStartTranslate" variant="secondary">⚡ DỊCH NGAY</sakuga-button>
+            <div class="action-pack-pill" title="Tiến độ bản dịch &amp; tổng câu duy nhất trong game">
+              <span class="dot dot-muted" id="actionPackDot"></span>
+              <strong id="statProgressMini" class="pack-pct">0%</strong>
+              <span class="pack-sep">•</span>
+              <span class="pack-lines"><span id="statUniqueCount">0</span> câu <small id="statDedupPct" class="muted"></small></span>
+            </div>
+          </div>
+          <div class="action-strip-right">
+            <button id="btnOpenSavedQuick" type="button" class="btn btn-ghost btn-sm" title="Mở Kho bản dịch &amp; Xuất/Nhập .sakugapack">📦 Kho dịch</button>
+            <button id="btnFixErrors" class="btn btn-warn-outline btn-sm" title="Dọn &lt;think&gt;, sửa thẻ tag hỏng, dịch lại câu lỗi, đồng bộ catalog.bin &amp; chống đen màn hình Steam">🛠 Fix lỗi</button>
+            <button id="btnQuickRestore" class="btn btn-ghost btn-sm" title="Khôi phục 100% file gốc">↺ Khôi phục gốc</button>
+            <button id="btnOpenSettingsDrawer" class="btn btn-outline btn-sm" title="Mở toàn bộ cài đặt chi tiết">⚙ Cài đặt &amp; Slot ▾</button>
+          </div>
+        </div>
+
+        <!-- Dismissible Repair Diagnostic Report Banner -->
+        <div id="repairReportBanner" class="repair-banner hidden">
+          <div class="repair-head">
+            <strong>🛠 KẾT QUẢ KIỂM TRA &amp; FIX LỖI SAU DỊCH</strong>
+            <div class="repair-actions">
+              <button id="btnFixFontsQuick" class="btn btn-sm btn-outline">🔤 Vá Font nếu bị ô vuông</button>
+              <button id="btnCloseRepairBanner" class="btn-icon">✕</button>
+            </div>
+          </div>
+          <ul id="repairSummaryList" class="repair-summary-list"></ul>
+        </div>
+
+        <!-- Interrupted Job Recovery Banner -->
+        <div id="interruptedJobBanner" class="repair-banner hidden">
+          <div class="repair-head">
+            <strong>⚠ PHÁT HIỆN PHIÊN DỊCH / FIX LỖI TRƯỚC BỊ TẮT ĐỘT NGỘT</strong>
+            <div class="repair-actions">
+              <button id="btnResumeInterrupted" class="btn btn-sm btn-outline">▶ Tiếp tục phần còn lại</button>
+              <button id="btnDismissInterrupted" class="btn-icon" title="Bỏ qua cảnh báo">✕</button>
+            </div>
+          </div>
+          <p id="interruptedJobDesc" class="mono-mini" style="margin:0;"></p>
+        </div>
+
+        <!-- Game Update / Verify Watcher Banner -->
+        <div id="gameUpdateBanner" class="repair-banner hidden">
+          <div class="repair-head">
+            <strong id="gameUpdateTitle">📦 PHÁT HIỆN GAME VỪA CẬP NHẬT / KIỂM TRA FILE STEAM</strong>
+            <div class="repair-actions">
+              <button id="btnRunDeltaUpdate" type="button" class="btn btn-sm btn-outline">↻ Áp dụng lại &amp; Dịch câu mới</button>
+              <button id="btnDismissUpdateBanner" type="button" class="btn-icon" title="Ẩn cảnh báo">✕</button>
+            </div>
+          </div>
+          <p id="gameUpdateDesc" class="mono-mini" style="margin:0;"></p>
+        </div>
+
+        <!-- Steam Sub-Navigation Tabs (4 Clean Tabs) -->
+        <div class="steam-subtabs">
+          <button class="subtab active" data-subtab="overview">Cơ bản (Dịch nhanh)</button>
+          <button class="subtab" data-subtab="live">Bảng Dịch &amp; Từ điển</button>
+          <button class="subtab" data-subtab="saved">Kho bản dịch &amp; An toàn</button>
+          <button class="subtab" data-subtab="settings">Cài đặt đầy đủ</button>
+        </div>
+
+        <!-- SUBTAB 1: MINIMALIST ESSENTIALS (DEFAULT!) -->
+        <div id="paneOverview" class="subtab-pane active">
+          <div class="overview-grid">
+            <!-- Left Minimalist Card: Language Pair + 3 Presets -->
+            <div class="panel-card">
+              <div class="card-header">
+                <span class="section-label">CẤU HÌNH CƠ BẢN</span>
+                <button id="btnLinkToFullSettings" class="link-btn">Tùy chỉnh Slot &amp; Phạm vi ➔</button>
+              </div>
+
+              <!-- Quick Target Language + Auto Recommended Slot Summary -->
+              <div class="basic-lang-bar">
+                <div class="basic-lang-item">
+                  <label>Ngôn ngữ gốc trong game</label>
+                  <select id="selectSourceLang" class="select-full"></select>
+                </div>
+                <div class="pair-arrow">➔</div>
+                <div class="basic-lang-item">
+                  <label>Ngôn ngữ dịch ra (<span id="activeModelShortLabel">AI Local</span>)</label>
+                  <select id="selectTargetLang" class="select-full">
+                    <option value="vi">Tiếng Việt (Vietnamese)</option>
+                    <option value="en">English</option>
+                    <option value="zh">简体中文 (Simplified Chinese)</option>
+                    <option value="zh-TW">繁體中文 (Traditional Chinese)</option>
+                    <option value="ja">日本語 (Japanese)</option>
+                    <option value="ko">한국어 (Korean)</option>
+                    <option value="fr">Français (French)</option>
+                    <option value="es">Español (Spanish)</option>
+                    <option value="de">Deutsch (German)</option>
+                    <option value="pt">Português (Portuguese)</option>
+                    <option value="pt-BR">Português do Brasil</option>
+                    <option value="it">Italiano (Italian)</option>
+                    <option value="ru">Русский (Russian)</option>
+                    <option value="pl">Polski (Polish)</option>
+                    <option value="th">ไทย (Thai)</option>
+                    <option value="id">Bahasa Indonesia</option>
+                    <option value="tr">Türkçe (Turkish)</option>
+                    <option value="ar">العربية (Arabic)</option>
+                    <option value="nl">Nederlands (Dutch)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="auto-slot-strip">
+                <div>
+                  <span class="mono-mini">SLOT CHÈN ĐỀ XUẤT HIỆN TẠI</span>
+                  <div id="activeSlotSummary" class="auto-slot-val">Tự động chọn slot tốt nhất...</div>
+                </div>
+                <button id="btnToggleSlotDrawer" class="btn btn-ghost btn-sm">Đổi Slot ▾</button>
+              </div>
+
+              <!-- Optional Inline Quick Slot Drawer (Hidden unless user clicks "Đổi Slot") -->
+              <div id="inlineSlotCollapse" class="inline-collapse hidden">
+                <div id="slotCardsGridQuick" class="slot-cards-grid"></div>
+              </div>
+
+              <!-- 3-Tier Preset Cards (Compact Pill Grid, no redundant slider) -->
+              <div class="tier-header">
+                <div class="header-title-with-tip">
+                  <span class="section-label">CHỌN 1 TRONG 3 MỨC ĐỘ DỊCH</span>
+                  <sakuga-tooltip text="Chọn 1 thẻ để tự cấu hình toàn bộ AI, Phạm vi &amp; Slot bên trong Cài đặt." label="Giải thích 3 mức độ">?</sakuga-tooltip>
+                </div>
+                <span id="activePresetBadge" class="badge">CẤP 2 • CÂN BẰNG</span>
+              </div>
+
+              <div class="presets-grid">
+                <div class="preset-card" id="presetCardFAST" data-preset="FAST" tabindex="0">
+                  <div class="preset-top">
+                    <span class="preset-lvl">CẤP 1</span>
+                    <span class="preset-eta-pill" id="estTimeFAST">⏱ ~--</span>
+                  </div>
+                  <h3>Siêu Tốc</h3>
+                  <p>Flash không suy luận, tối ưu tốc độ.</p>
+                </div>
+
+                <div class="preset-card active" id="presetCardBALANCED" data-preset="BALANCED" tabindex="0">
+                  <div class="preset-top">
+                    <span class="preset-lvl rec">CẤP 2 ★</span>
+                    <span class="preset-eta-pill" id="estTimeBALANCED">⏱ ~--</span>
+                  </div>
+                  <h3>Cân Bằng</h3>
+                  <p>Chốt từ điển 1 lần + văn phong chuẩn.</p>
+                </div>
+
+                <div class="preset-card" id="presetCardDEEP_STORY" data-preset="DEEP_STORY" tabindex="0">
+                  <div class="preset-top">
+                    <span class="preset-lvl">CẤP 3</span>
+                    <span class="preset-eta-pill" id="estTimeDEEP_STORY">⏱ ~--</span>
+                  </div>
+                  <h3>Cốt Truyện Sâu</h3>
+                  <p>Deep-Think từng cụm thoại &amp; lựa chọn.</p>
+                </div>
+              </div>
+
+              <!-- Dual-Model Speed & Quality Control Card -->
+              <div id="dualModelQuickBar" class="dual-model-quick-bar">
+                <div class="dual-quick-head">
+                  <div class="dual-quick-info">
+                    <div class="dual-quick-title-row">
+                      <span class="section-label">⚡ DUAL-MODEL TĂNG TỐC</span>
+                      <span id="dualModeStatusBadge" class="badge">TẮT (1 Model)</span>
+                    </div>
+                    <div id="dualModeExplainText" class="mono-mini">Quét nhanh nút Menu bằng Model nhẹ • Giữ 100% chất lượng Thoại bằng Model chính.</div>
+                  </div>
+                  <div class="dual-quick-actions">
+                    <button id="btnConfigDualModels" type="button" class="btn btn-ghost btn-sm" title="Chọn Model nhẹ cho UI &amp; Model chính cho Cốt truyện">⚙ Đổi Model</button>
+                    <sakuga-toggle id="chkDualModelQuick" label="Bật Dual-Model"></sakuga-toggle>
+                  </div>
+                </div>
+                <div id="dualModelPairStrip" class="dual-quick-pair">
+                  <span class="dual-pair-chip chip-ui">⚡ UI nhanh: <strong id="lblUiFastModelName">qwen3:1.7b</strong></span>
+                  <span class="dual-pair-arrow">➔</span>
+                  <span class="dual-pair-chip chip-main">📖 Thoại chuẩn: <strong id="lblMainStoryModelName">qwen3.5:4b</strong></span>
+                </div>
+              </div>
+
+              <!-- Compact Collapsible Game Context & 2-Layer Skill Hub (Collapsed by default) -->
+              <div class="context-style-box collapsed">
+                <div class="context-style-head" id="btnToggleContextDrawer" role="button" tabindex="0">
+                  <div class="context-head-left">
+                    <span class="section-label">SKILL &amp; VĂN PHONG</span>
+                    <span id="summaryBridgePill" class="bridge-pill-mini">Auto Bridge</span>
+                    <span id="activeToneBadge" class="badge">Chuẩn Tự Nhiên</span>
+                    <span id="compiledStyleBadge" class="kv-pill hidden">KV Style Card ✓</span>
+                  </div>
+                  <div class="context-head-actions">
+                    <button id="btnFetchSteamContext" type="button" class="btn btn-ghost btn-sm" title="Kéo lại mô tả &amp; thể loại từ Steam Store">↻ Steam</button>
+                    <span class="mono-mini context-toggle-hint">Đổi văn phong</span>
+                    <span id="contextChevron" class="mono-mini">▸</span>
+                  </div>
+                </div>
+                <div id="contextDrawerBody" class="context-drawer-body hidden">
+                  <div class="lang-bridge-strip">
+                    <span class="lang-bridge-meta">🌉 Cầu Ngôn Ngữ: <strong id="activeLangBridgeLabel">Auto Bridge</strong></span>
+                    <select id="selectLangBridgeOverride" class="select-compact select-bridge" title="Chọn Cầu Ngôn Ngữ Lớp 1"></select>
+                  </div>
+                  <div class="skill-bar-wrap">
+                    <div id="tonePresetBar" class="tone-preset-row"></div>
+                    <button id="btnQuickCreateSkill" type="button" class="tone-pill tone-pill-add">+ Tạo Skill</button>
+                  </div>
+                  <div id="activeSkillHoverHint" class="mono-mini skill-hover-hint">Chọn Bộ Văn Phong (Lớp 2) — tự nạp cùng Cầu Ngôn Ngữ ở đỉnh KV-Cache.</div>
+                  <textarea id="txtGameContext" class="context-textarea" rows="3" placeholder="Dán cốt truyện, bối cảnh hoặc quy ước xưng hô riêng (VD: Nhân vật chính là lính đánh thuê lạnh lùng, xưng Tôi - Ngươi)..."></textarea>
+                  <div id="compiledStylePreview" class="compiled-style-preview">Pha 0 sẽ tự nén thành Style Card ≤ 4 dòng (KV-Cache Prefix) khi dịch.</div>
+                </div>
+              </div>
+
+              <!-- One-click Re-apply Skill Banner when editing/changing Skill on a translated game -->
+              <div id="reapplySkillBanner" class="reapply-skill-banner hidden">
+                <div class="reapply-text">
+                  <strong>🔄 Bạn vừa đổi / cập nhật Skill Văn Phong cho game đã dịch:</strong>
+                  <span class="mono-mini">Chọn cách áp dụng lại Skill mới (mọi câu bạn đã sửa tay được giữ an toàn 100%).</span>
+                </div>
+                <div class="reapply-actions">
+                  <button id="btnReapplyFlagged" type="button" class="btn btn-sm btn-outline">🔄 Chỉ dịch lại câu lỗi</button>
+                  <button id="btnReapplySub" type="button" class="btn btn-sm btn-outline">📖 Dịch lại Cốt truyện/Sub</button>
+                  <button id="btnReapplyAll" type="button" class="btn btn-sm btn-warn-outline">⚡ Dịch lại toàn bộ</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right Minimalist Card: Live Progress & Latest Subtitles Preview -->
+            <div class="panel-card progress-overview-card">
+              <div class="card-header">
+                <span id="phaseStatusLabel" class="phase-pill">Sẵn sàng</span>
+                <div class="progress-eta-right">
+                  <span id="etaCalibratedLabel" class="mono-sub">Ước lượng theo độ dài thật</span>
+                  <span class="eta-chip">⏱ <strong id="teleEtaMini">--</strong></span>
+                </div>
+              </div>
+
+              <div class="sakuga-progress-banner">
+                <div class="progress-live-strip" id="progressLiveStrip">
+                  <span class="pls-state">
+                    <span id="progLiveDot" class="dot dot-muted"></span>
+                    <span id="progLiveTask">Sẵn sàng</span>
+                  </span>
+                  <span class="pls-metrics">
+                    <span id="progLiveVram">VRAM: 0.0 / 8.0 GB</span>
+                    <span class="pls-sep">•</span>
+                    <span id="progLiveTokens">Token: 0 (0.0 tok/s)</span>
+                  </span>
+                </div>
+                <div id="liveActiveModelBanner" class="live-active-model-banner">🤖 Model sẵn sàng: qwen3.5:4b (Dịch toàn bộ UI &amp; Cốt truyện)</div>
+                <sakuga-progress id="sakugaProgressBar" label="Tiến độ dịch" done-label="Hoàn tất ✓"></sakuga-progress>
+              </div>
+
+              <div class="mini-live-head">
+                <span class="section-label">XEM NHANH BẢN DỊCH MỚI NHẤT</span>
+                <button id="btnViewAllLive" class="link-btn">Xem tất cả &amp; Sửa tay ➔</button>
+              </div>
+              <div id="miniLivePreview" class="mini-live-preview">
+                <div class="empty-state">Bấm <strong>⚡ DỊCH NGAY</strong> ở thanh trên để bắt đầu dịch bằng AI Local.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SUBTAB 2: FULL LIVE TRANSLATION TABLE & GLOSSARY -->
+        <div id="paneLive" class="subtab-pane">
+          <div class="split-live-grid">
+            <div class="panel-card full-live-card">
+              <div class="live-filter-row">
+                <sakuga-input id="inpFilterLive" label="Tìm toàn bộ DB" placeholder="Tìm câu gốc, bản dịch hoặc Key ID trong toàn bộ game..."></sakuga-input>
+                <div class="live-toolbar-actions">
+                  <select id="selectLiveCategoryFilter" class="select-compact" title="Lọc theo loại câu">
+                    <option value="ALL">Tất cả đã dịch</option>
+                    <option value="EDITED">Đã sửa tay</option>
+                    <option value="SUBTITLE">Cốt truyện / Sub</option>
+                    <option value="UI">Giao diện UI</option>
+                    <option value="PENDING">Chưa dịch / Lỗi</option>
+                  </select>
+                  <button id="btnToggleBulkReplace" type="button" class="btn btn-outline btn-sm">🔍 Thay thế hàng loạt</button>
+                  <button id="btnHotApplyLive" type="button" class="btn btn-outline btn-sm" title="Ghi ngay các bản sửa tay vào file game hiện tại (0s)">⚡ Ghi nóng</button>
+                </div>
+              </div>
+              <div id="bulkReplaceDrawer" class="bulk-replace-drawer hidden">
+                <input id="inpBulkFind" type="text" class="select-compact" placeholder="Tìm từ/cụm từ trong bản dịch..." />
+                <input id="inpBulkReplace" type="text" class="select-compact" placeholder="Thay thế thành..." />
+                <label class="bulk-case-lbl"><input id="chkBulkCaseSensitive" type="checkbox" /> Phân biệt Hoa/thường</label>
+                <button id="btnRunBulkReplace" type="button" class="btn btn-outline btn-sm">Thay trong DB</button>
+                <button id="btnRunBulkReplaceAndApply" type="button" class="btn btn-outline btn-sm">⚡ Thay &amp; Ghi nóng</button>
+              </div>
+              <div class="live-table-head">
+                <span>KEY ID</span>
+                <span>NGUYÊN BẢN ➔ BẢN DỊCH</span>
+                <span>NHÃN</span>
+              </div>
+              <div id="liveRowsBody" class="live-rows-body"></div>
+            </div>
+
+            <div class="panel-card glossary-side-card">
+              <div class="card-header">
+                <span class="section-label">TỪ ĐIỂN THUẬT NGỮ &amp; PRE-THINK</span>
+              </div>
+              <details id="prethinkDetails" class="prethink-box">
+                <summary class="prethink-head"><span>Suy luận Pha 0 (<span id="prethinkModelLabel">Local AI</span>)</span><span id="prethinkSummaryHint" class="mono-mini">• Thu gọn</span></summary>
+                <pre id="prethinkOutput" class="prethink-text">Chưa có nhật ký Pre-Think.</pre>
+              </details>
+              <div class="glossary-add-row">
+                <sakuga-input id="inpGlossarySrc" label="Từ nguồn" placeholder="Từ nguồn"></sakuga-input>
+                <sakuga-input id="inpGlossaryTgt" label="Dịch chuẩn" placeholder="Dịch chuẩn"></sakuga-input>
+                <sakuga-button id="btnAddGlossary">+</sakuga-button>
+              </div>
+              <div id="glossaryList" class="glossary-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SUBTAB 3: SAVED TRANSLATIONS MANAGER & 6 SAFETY SHIELDS -->
+        <div id="paneSaved" class="subtab-pane">
+          <div class="panel-card">
+            <div class="saved-packs-head">
+              <div>
+                <span class="section-label">KHO BẢN DỊCH ĐÃ LƯU (.SAKUGAPACK)</span>
+                <div class="mono-mini">Bản dịch cũ luôn được lưu lại kể cả sau khi bấm ↺ Khôi phục gốc. Có thể xuất/nhập .sakugapack 1-Click cho bạn bè.</div>
+              </div>
+              <div class="live-toolbar-actions">
+                <button id="btnImportSakugaPack" type="button" class="btn btn-outline btn-sm">📥 Nhập .sakugapack (1-Click)</button>
+                <input id="inpImportSakugaPackFile" type="file" accept=".sakugapack,.zip,.json" class="hidden" />
+                <span id="savedCachePathLabel" class="mono-mini">cache/--.db</span>
+              </div>
+            </div>
+            <div id="savedTranslationsList" class="saved-packs-list">
+              <div class="empty-state">Chưa có bản dịch nào được lưu cho game này.</div>
+            </div>
+          </div>
+
+          <details id="shieldsDetailsCard" class="panel-card saved-packs-card shields-collapsible" open>
+            <summary class="card-header shields-summary-head">
+              <div>
+                <span class="section-label">HỆ THỐNG BẢO VỆ 6 LỚP (AN TOÀN TUYỆT ĐỐI)</span>
+                <span class="mono-mini" style="margin-left:8px;">Backup SHA-256 • Anti-Cheat Guard • Tag Firewall</span>
+              </div>
+              <button id="btnOpenBackupFolder" type="button" class="btn btn-outline btn-sm">📂 Mở thư mục Backup</button>
+            </summary>
+            <div id="shieldsChecklist" class="shields-list" style="margin-top:10px;"></div>
+          </details>
+        </div>
+
+        <!-- SUBTAB 4: FULL ADVANCED SETTINGS (Steam Properties Style) -->
+        <div id="paneSettings" class="subtab-pane">
+          <div class="settings-two-col">
+            <div class="panel-card">
+              <div class="card-header">
+                <span class="section-label">1. SLOT NGÔN NGỮ &amp; CÀI ĐẶT CHÈN FILE</span>
+                <button id="btnRescanGame" class="btn btn-ghost btn-sm">↻ Quét lại game</button>
+              </div>
+              <div id="dedupStatsBanner" class="stats-row" style="margin-bottom:10px;">
+                <span class="stat-chip">Tổng gốc: <strong id="statRawCount">0</strong></span>
+                <span class="stat-chip">TM 0ms: <strong id="statTmHits">0</strong></span>
+                <span class="stat-chip stat-fold hidden" id="statTemplateFoldChip">Gộp mẫu số: <strong id="statFoldSaved">0</strong></span>
+                <span class="stat-chip" id="studioEngineMethod">--</span>
+              </div>
+              <div id="slotCardsGrid" class="slot-cards-grid"></div>
+              <div id="slotGuideBox" class="slot-guide-box" style="margin-top:10px;">
+                Chọn 1 slot ở trên để xem hướng dẫn bật ngôn ngữ trong Settings game.
+              </div>
+            </div>
+
+            <div class="panel-card">
+              <div class="card-header">
+                <span class="section-label">2. PHẠM VI DỊCH, AI ENGINE &amp; KHỞI CHẠY</span>
+              </div>
+
+              <div class="control-block">
+                <label class="sub-label">Phạm vi dịch</label>
+                <div id="scopeSegmented" class="segmented">
+                  <button class="seg-btn active" data-scope="FULL_PATCH">Toàn bộ game</button>
+                  <button class="seg-btn" data-scope="SUB_ONLY">Chỉ Sub &amp; Cốt truyện</button>
+                  <button class="seg-btn" data-scope="UI_ONLY">Chỉ Giao diện UI</button>
+                </div>
+                <div id="subOptionsDrawer" class="sub-options hidden">
+                  <sakuga-checkbox id="chkTranslateChoices" checked>Dịch lựa chọn (Choices)</sakuga-checkbox>
+                  <sakuga-checkbox id="chkKeepProperNouns" checked>Giữ tên Item/Skill/Map nguồn trong Sub</sakuga-checkbox>
+                </div>
+              </div>
+
+              <div class="control-block">
+                <label class="sub-label">Động cơ AI Local (<span id="settingsActiveModelLabel">Ollama</span>)</label>
+                <div id="aiModeSegmented" class="segmented">
+                  <button class="seg-btn" data-aimode="FLASH">Flash No-Think</button>
+                  <button class="seg-btn active" data-aimode="AUTO_HYBRID">Auto-Hybrid ★</button>
+                  <button class="seg-btn" data-aimode="DEEP_THINK">Deep-Think</button>
+                </div>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <strong>Bật Dual-Model Local (Tăng tốc UI • Giữ nguyên chất lượng Thoại)</strong>
+                  <div class="mono-mini">Dùng Model nhẹ dịch nhãn UI/Menu trước, tự xả VRAM rồi nạp Model chính dịch Cốt truyện &amp; QA</div>
+                </div>
+                <sakuga-toggle id="chkDualModelSettings" label="Dual-Model Local"></sakuga-toggle>
+              </div>
+
+              <div class="settings-divider"></div>
+
+              <div class="settings-row">
+                <div>
+                  <strong>Vá Font Tiếng Việt (Mặc định)</strong>
+                  <div class="mono-mini">Tự thay font fallback để chữ có dấu đều nét, không bị in hoa hay to lệch cỡ</div>
+                </div>
+                <sakuga-toggle id="chkPatchFonts" label="Vá Font Tiếng Việt" checked></sakuga-toggle>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <strong>Chế độ mở Game an toàn</strong>
+                  <div class="mono-mini">Mặc định dùng Steam URI để giữ Online/Co-op</div>
+                </div>
+                <select id="selectLaunchMode" class="select-compact">
+                  <option value="steam">Steam Launcher (steam://rungameid)</option>
+                  <option value="shortcut">Shortcut (.url / .lnk)</option>
+                  <option value="direct_exe">Direct EXE</option>
+                </select>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <strong>Ẩn xuống khay hệ thống khi Thu nhỏ / Đóng (X)</strong>
+                  <div class="mono-mini">Giữ cửa sổ chạy ngầm ở khay khi thu nhỏ hoặc lỡ bấm X lúc đang dịch / fix lỗi</div>
+                </div>
+                <sakuga-toggle id="chkMinimizeToTray" label="Ẩn xuống khay" checked></sakuga-toggle>
+              </div>
+
+              <div class="settings-row">
+                <div>
+                  <strong>Ảnh bìa &amp; Hồ sơ Game</strong>
+                  <div class="mono-mini">Đổi tên, AppID hoặc ảnh bìa dọc 2:3</div>
+                </div>
+                <button id="btnHeroEditCover" class="btn btn-outline btn-sm">🖼 Chỉnh sửa</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- VIEW C: 2-LAYER SKILL HUB, GLOBAL TM & GITHUB TOOLS -->
+      <section id="viewTools" class="main-view">
+        <div class="tools-workspace">
+          <div class="panel-card">
+            <div class="card-header">
+              <div>
+                <h2>Kho Skill 2 Lớp (Cầu Ngôn Ngữ &amp; Bộ Văn Phong)</h2>
+                <p class="mono-sub">Tạo, chỉnh sửa No-Code hoặc xuất/nhập gói Skill (.md / .zip) cho cộng đồng</p>
+              </div>
+              <div class="skill-hub-actions">
+                <button id="btnNewSkill" type="button" class="btn btn-outline btn-sm">+ Tạo Skill Mới</button>
+                <button id="btnAiGenSkillOpen" type="button" class="btn btn-outline btn-sm">✨ Tạo bằng AI</button>
+                <button id="btnImportSkill" type="button" class="btn btn-ghost btn-sm">📥 Nhập .md / .zip</button>
+                <input id="inpImportSkillFile" type="file" accept=".md,.zip" class="hidden" />
+                <button id="btnOpenSkillsFolder" type="button" class="btn btn-ghost btn-sm">📂 Mở thư mục skills/</button>
+              </div>
+            </div>
+            <div class="skill-hub-tabs">
+              <button id="skillSubtabStyles" type="button" class="seg-btn active">🎭 Bộ Văn Phong (Lớp 2)</button>
+              <button id="skillSubtabLangs" type="button" class="seg-btn">🌉 Cầu Ngôn Ngữ (Lớp 1)</button>
+            </div>
+            <div id="skillsCatalogGrid" class="skills-catalog-grid"></div>
+          </div>
+
+          <div class="panel-card">
+            <div class="card-header">
+              <div>
+                <h2>Bộ công cụ GitHub (tools/)</h2>
+                <p class="mono-sub">repak.exe, UnrealLocres.exe, rpatool.py và Font Unicode Offline</p>
+              </div>
+              <sakuga-button id="btnUpdateTools">↻ Cập nhật Tools</sakuga-button>
+            </div>
+            <div id="toolsCardsList" class="tools-grid"></div>
+          </div>
+
+          <div class="panel-card">
+            <div class="card-header">
+              <div>
+                <h2>Global Translation Memory (0ms Hit)</h2>
+                <p class="mono-sub">Bộ nhớ dịch chia sẻ đa game (<span id="tmTotalCount">0</span> mẫu câu)</p>
+              </div>
+              <sakuga-input id="tmSearchInput" label="Tìm TM" placeholder="Tìm trong Global TM..."></sakuga-input>
+            </div>
+            <div id="tmEntriesList" class="tm-list"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Steam Status Footer Bar (36px compact telemetry strip) -->
+  <footer class="steam-statusbar">
+    <div class="sb-left">
+      <span id="teleVram" class="sb-item">VRAM: 0.0 / 8.0 GB</span>
+      <span class="sb-sep">•</span>
+      <span id="teleSpeed" class="sb-item">0.0 tok/s • Worker Pool</span>
+      <span class="sb-sep">•</span>
+      <span id="teleProgress" class="sb-item">Tiến độ: 0%</span>
+      <span class="sb-sep">•</span>
+      <span id="teleEta" class="sb-item strong">Dự kiến: --</span>
+    </div>
+    <div class="sb-right">
+      <span id="footerModelBadge" class="sb-item muted">BLACK SAKURA TRANSLATE // LOCAL AI</span>
+    </div>
+  </footer>
+
+  <!-- ==================== MODALS ==================== -->
+  <div id="modalAddGame" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>+ THÊM GAME / SHORTCUT</h3>
+        <button id="btnCloseAddModal" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="add-input-row">
+          <sakuga-input id="inpGamePath" label="Đường dẫn game" placeholder="Dán đường dẫn thư mục game, .url, .lnk hoặc .exe..."></sakuga-input>
+          <sakuga-button id="btnSubmitGamePath">Thêm</sakuga-button>
+        </div>
+        <div class="picker-buttons">
+          <button id="btnPickFolder" class="btn btn-outline btn-sm">📁 Chọn Thư mục Game</button>
+          <button id="btnPickFile" class="btn btn-outline btn-sm">🔗 Chọn Shortcut (.url / .lnk / .exe)</button>
+        </div>
+        <div class="steam-discover-head">
+          <span>GAME STEAM TRÊN MÁY (ValvePython/vdf)</span>
+          <button id="btnRefreshSteamModal" class="btn btn-ghost btn-sm">↻ Làm mới</button>
+        </div>
+        <div id="steamAppsList" class="steam-apps-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="modalEditProfile" class="modal hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-head">
+        <h3>🖼 ĐỔI ẢNH BÌA &amp; HỒ SƠ GAME</h3>
+        <button id="btnCloseEditModal" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field-group">
+          <label>Tên hiển thị</label>
+          <input id="editTitle" type="text" class="select-full" />
+        </div>
+        <div class="field-group">
+          <label>Chế độ khởi chạy</label>
+          <select id="editLaunchMode" class="select-full">
+            <option value="steam">Steam Launcher (steam://rungameid)</option>
+            <option value="shortcut">Windows / Steam Shortcut</option>
+            <option value="direct_exe">Direct EXE</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label>Steam AppID</label>
+          <input id="editAppId" type="text" class="select-full" placeholder="VD: 2881650" />
+        </div>
+        <div class="field-group">
+          <label>Tải ảnh bìa tùy chỉnh (2:3)</label>
+          <input id="editCoverFile" type="file" accept=".jpg,.jpeg,.png,.webp" />
+        </div>
+        <div class="modal-actions">
+          <button id="btnDeleteGame" class="btn btn-danger-outline btn-sm">Xóa khỏi thư viện</button>
+          <sakuga-button id="btnSaveProfile">Lưu thay đổi</sakuga-button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Hardware Profiler & Any Local Ollama Model -->
+  <div id="modalHardwareSettings" class="modal hidden">
+    <div class="modal-card modal-lg">
+      <div class="modal-head">
+        <h3>⚙ MODEL AI &amp; TỐI ƯU PHẦN CỨNG</h3>
+        <button id="btnCloseHwModal" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="hwDetectedSummary" class="hw-summary-card">Đang kiểm tra GPU NVIDIA / RAM hệ thống...</div>
+        <div id="ollamaEnvWarnBox" class="repair-banner hidden" style="margin:0;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;flex-wrap:wrap;">
+            <span id="ollamaEnvWarnText" class="mono-mini"></span>
+            <button id="btnCopyEnvFix" type="button" class="btn btn-sm btn-outline">📋 Copy lệnh tối ưu Ollama</button>
+          </div>
+        </div>
+
+        <div class="hw-section-box">
+          <div class="settings-row" style="padding:2px 0;">
+            <div>
+              <strong>1. Tự động tối ưu theo máy (Khuyên dùng)</strong>
+              <div class="mono-mini">Tự cân chỉnh luồng chạy &amp; bộ nhớ an toàn theo GPU/RAM của bạn, không cần chỉnh tay.</div>
+            </div>
+            <input id="chkAutoTuneHw" type="checkbox" class="hw-checkbox" checked />
+          </div>
+          <div class="settings-row" style="padding:6px 0 2px; border-top:1px dashed var(--border); margin-top:6px;">
+            <div>
+              <strong>🎧 Chế độ Laptop Yên Tĩnh / Bảo vệ Tai nghe USB (Quiet Mode)</strong>
+              <div class="mono-mini">Giới hạn tối đa 2 luồng + nghỉ 65ms giữa các batch để giảm nhiệt laptop &amp; chống sụt áp cổng USB audio.</div>
+            </div>
+            <input id="chkQuietModeHw" type="checkbox" class="hw-checkbox" />
+          </div>
+        </div>
+
+        <div class="hw-section-box">
+          <div class="field-group">
+            <label>2. Model AI dịch chính (Dịch Cốt truyện, Hội thoại &amp; Fix lỗi)</label>
+            <select id="selectMainModel" class="select-full"></select>
+          </div>
+
+          <div class="settings-row" style="margin-top:6px;">
+            <div>
+              <strong>Chế độ Dual-Model (Tăng tốc menu UI, giữ nguyên chất lượng Thoại)</strong>
+              <div class="mono-mini">Dùng model nhỏ dịch nhanh các nút menu trước, sau đó tự giải phóng VRAM để model chính dịch toàn bộ cốt truyện.</div>
+            </div>
+            <input id="chkDualModel" type="checkbox" class="hw-checkbox" />
+          </div>
+          <div id="dualModelRow" class="field-group hidden">
+            <label>Model phụ siêu nhanh cho Menu / UI ngắn</label>
+            <select id="selectUiFastModel" class="select-full"></select>
+          </div>
+
+          <div class="field-group" style="margin-top:6px;">
+            <label>Tải thêm Model gợi ý phù hợp máy bạn (100% Local)</label>
+            <div class="pull-select-row">
+              <select id="selectRecommendModel" class="select-full"></select>
+              <button id="btnPullModel" type="button" class="btn btn-outline btn-sm">⬇ Tải về</button>
+            </div>
+            <div id="pullProgressWrap" class="pull-progress-wrap hidden">
+              <div class="pull-bar-bg"><div id="pullProgressBar" class="pull-bar-fill" style="width:0%;"></div></div>
+              <span id="pullProgressText" class="mono-mini">Đang kết nối Ollama...</span>
+            </div>
+          </div>
+        </div>
+
+        <details id="hwAdvancedDetails" class="hw-advanced-box">
+          <summary>🔧 3. Tùy chỉnh kỹ thuật nâng cao (Bỏ qua nếu đang dùng Tự động)</summary>
+          <div class="hw-two-col" style="margin-top:10px;">
+            <div class="field-group">
+              <label>Số luồng xử lý song song: <strong id="valParallelWorkers">5</strong> luồng</label>
+              <input id="sliderParallelWorkers" type="range" min="1" max="12" step="1" value="5" style="width:100%;" />
+            </div>
+            <div class="field-group">
+              <label>Độ dài ngữ cảnh (Context Window)</label>
+              <select id="selectNumCtx" class="select-full">
+                <option value="2048">2048 tokens (Tiết kiệm VRAM — Khuyên dùng)</option>
+                <option value="4096">4096 tokens (GPU ≥ 12GB VRAM)</option>
+                <option value="8192">8192 tokens (GPU ≥ 16GB VRAM)</option>
+              </select>
+            </div>
+          </div>
+          <div class="field-group" style="margin-top:8px;">
+            <label>Địa chỉ máy chủ Ollama Local</label>
+            <input id="inpOllamaBaseUrl" type="text" class="select-full" value="http://localhost:11434" />
+          </div>
+        </details>
+
+        <div class="modal-actions modal-actions-end">
+          <sakuga-button id="btnSaveHwSettings">💾 Lưu cấu hình AI</sakuga-button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: No-Code 2-Layer Skill Editor & 1-Sentence AI Skill Builder -->
+  <div id="modalSkillEditor" class="modal hidden">
+    <div class="modal-card modal-lg">
+      <div class="modal-head">
+        <h3 id="modalSkillEditorTitle">🧩 TRÌNH TẠO SKILL VĂN PHONG (NO-CODE)</h3>
+        <button id="btnCloseSkillModal" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="ai-skill-gen-bar">
+          <input id="inpAiSkillIdea" type="text" class="select-full" placeholder="Mô tả 1 câu (VD: Dịch kiếm hiệp Kim Dung, xưng Huynh - Đệ, câu ngắn dứt khoát)..." />
+          <button id="btnRunAiGenSkill" type="button" class="btn btn-outline btn-sm">✨ Nhờ AI viết nháp</button>
+        </div>
+
+        <div class="hw-two-col">
+          <div class="field-group">
+            <label>Tên Skill</label>
+            <input id="inpSkillName" type="text" class="select-full" placeholder="VD: Kiếm Hiệp Cổ Phong" />
+          </div>
+          <div class="hw-two-col">
+            <div class="field-group">
+              <label>Biểu tượng</label>
+              <input id="inpSkillIcon" type="text" class="select-full" value="🎭" maxlength="6" />
+            </div>
+            <div class="field-group">
+              <label>Lớp Skill</label>
+              <select id="selectSkillLayer" class="select-full">
+                <option value="styles">Bộ Văn Phong (Lớp 2)</option>
+                <option value="languages">Cầu Ngôn Ngữ (Lớp 1)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="hw-two-col">
+          <div class="field-group">
+            <label>Mô tả ngắn (hiển thị khi rê chuột)</label>
+            <input id="inpSkillDesc" type="text" class="select-full" placeholder="VD: Giọng cổ trang Hán-Việt, phù hợp RPG/Wuxia..." />
+          </div>
+          <div class="field-group">
+            <label>Cặp ngôn ngữ (any hoặc fr➔vi)</label>
+            <input id="inpSkillLangPair" type="text" class="select-full" value="any" />
+          </div>
+        </div>
+
+        <div class="field-group">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <label>Quy tắc dịch cốt lõi (mỗi dòng 1 ý ngắn)</label>
+            <span id="skillTokenMeter" class="mono-mini">~0 / 160 tokens</span>
+          </div>
+          <textarea id="txtSkillRules" class="context-textarea" rows="4" placeholder="- Giữ đại từ xưng hô đồng nhất...&#10;- Câu thoại gọn mạnh, tự nhiên..."></textarea>
+        </div>
+
+        <div class="field-group">
+          <label>3 Ví dụ mẫu (Câu gốc ➔ Câu dịch chuẩn)</label>
+          <div class="skill-ex-grid">
+            <input id="inpSkillExSrc1" type="text" class="select-full" placeholder="Câu gốc 1..." />
+            <input id="inpSkillExTgt1" type="text" class="select-full" placeholder="Câu dịch chuẩn 1..." />
+            <input id="inpSkillExSrc2" type="text" class="select-full" placeholder="Câu gốc 2..." />
+            <input id="inpSkillExTgt2" type="text" class="select-full" placeholder="Câu dịch chuẩn 2..." />
+            <input id="inpSkillExSrc3" type="text" class="select-full" placeholder="Câu gốc 3..." />
+            <input id="inpSkillExTgt3" type="text" class="select-full" placeholder="Câu dịch chuẩn 3..." />
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <sakuga-button id="btnSaveSkill">💾 Lưu vào Kho Skill</sakuga-button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/studio_app.js"></script>
+</body>
+</html>
