@@ -564,7 +564,7 @@ async def launch_game_safely(game: Dict[str, Any], qwen_engine) -> Dict[str, Any
     exe_path = (game.get("exe_path") or "").strip()
     game_dir = game.get("game_dir") or ""
 
-    if mode == "steam" and appid:
+    if mode == "steam" and appid and appid.isdigit():
         uri = f"steam://rungameid/{appid}"
         os.startfile(uri)
         return {"ok": True, "launched_via": "steam", "target": uri}
@@ -578,7 +578,7 @@ async def launch_game_safely(game: Dict[str, Any], qwen_engine) -> Dict[str, Any
         subprocess.Popen([exe_path], cwd=game_dir or str(Path(exe_path).parent), creationflags=flags)
         return {"ok": True, "launched_via": "direct_exe", "target": exe_path}
 
-    if appid:
+    if appid and appid.isdigit():
         uri = f"steam://rungameid/{appid}"
         os.startfile(uri)
         return {"ok": True, "launched_via": "steam", "target": uri}

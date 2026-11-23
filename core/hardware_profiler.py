@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import warnings
 from pathlib import Path
@@ -43,10 +44,22 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 
 
 def normalize_ollama_url(url: Optional[str]) -> str:
+    from urllib.parse import urlparse
+
     raw = (url or os.environ.get("OLLAMA_HOST") or "http://localhost:11434").strip().rstrip("/")
-    if not raw.startswith("http"):
+    lower = raw.lower()
+    if lower.startswith(("javascript:", "data:", "file:", "vbscript:")):
+        return "http://localhost:11434"
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", raw):
         raw = f"http://{raw}"
-    return raw
+    parsed = urlparse(raw)
+    try:
+        _ = parsed.port
+    except ValueError:
+        return "http://localhost:11434"
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
+        return "http://localhost:11434"
+    return f"{parsed.scheme.lower()}://{parsed.netloc}{parsed.path}".rstrip("/")
 
 
 def classify_hardware_tier(

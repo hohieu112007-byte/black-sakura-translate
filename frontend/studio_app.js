@@ -623,7 +623,8 @@ function renderSidebarGames() {
   for (const g of items) {
     const row = document.createElement("div");
     row.className = `sb-game-row ${g.game_id === state.selectedGameId ? "selected" : ""}`;
-    const thumbStyle = g.cover_url ? `background-image:url('${g.cover_url}')` : "";
+    const safeCov = safeCoverUrl(g.cover_url);
+    const thumbStyle = safeCov ? `background-image:url('${safeCov}')` : "";
     const statusText = g.anticheat_status === "BLOCKED"
       ? "🛡 Anti-Cheat"
       : g.is_patched
@@ -667,10 +668,10 @@ function renderPosterGrid() {
       ? "💾 ĐÃ DỊCH"
       : "CHƯA DỊCH";
     const media = g.cover_url
-      ? `<img class="poster-img" src="${g.cover_url}" alt="${escapeHtml(g.title)}" />`
+      ? `<img class="poster-img" src="${escapeHtml(safeCoverUrl(g.cover_url))}" alt="${escapeHtml(g.title)}" />`
       : `<div class="poster-fallback"><strong>${escapeHtml(g.title)}</strong></div>`;
     card.innerHTML = `
-      <span class="poster-status-badge">${badgeTxt}</span>
+      <span class="poster-status-badge">${escapeHtml(badgeTxt)}</span>
       <button type="button" class="poster-remove-btn" title="Bỏ game khỏi danh sách">✕</button>
       ${media}
       <div class="poster-footer"><div class="poster-title">${escapeHtml(g.title)}</div></div>
@@ -717,9 +718,10 @@ async function renderSelectedGamePage() {
   $("btnQuickRestore").disabled = !g.has_backup;
   if ($("navGameDetailBtn")) $("navGameDetailBtn").textContent = g.title || "Trang Game";
   $("heroTitle").textContent = g.title;
-  $("heroBgImage").style.backgroundImage = g.cover_url ? `url('${g.cover_url}')` : "none";
-  $("ambientGameBackdrop").style.backgroundImage = g.cover_url ? `url('${g.cover_url}')` : "none";
-  $("heroPosterThumb").style.backgroundImage = g.cover_url ? `url('${g.cover_url}')` : "none";
+  const safeCov = safeCoverUrl(g.cover_url);
+  $("heroBgImage").style.backgroundImage = safeCov ? `url('${safeCov}')` : "none";
+  $("ambientGameBackdrop").style.backgroundImage = safeCov ? `url('${safeCov}')` : "none";
+  $("heroPosterThumb").style.backgroundImage = safeCov ? `url('${safeCov}')` : "none";
 
   $("heroLaunchBadge").textContent = g.launch_mode === "steam" && g.steam_appid ? `STEAM • ${g.steam_appid}` : g.launch_mode.toUpperCase();
   $("heroEngineBadge").textContent = g.engine || "Unknown Engine";
@@ -982,10 +984,10 @@ function renderSlotGrids() {
       card.className = `slot-card ${s.slot_id === state.injectSlot ? "active" : ""}`;
       card.innerHTML = `
         <div class="slot-card-top">
-          <span class="slot-name">${s.display_name || s.slot_id.toUpperCase()} (${s.slot_id})</span>
-          <span class="slot-badge ${s.recommended ? "rec" : "norm"}">${s.badge || "SLOT"}</span>
+          <span class="slot-name">${escapeHtml(s.display_name || s.slot_id.toUpperCase())} (${escapeHtml(s.slot_id)})</span>
+          <span class="slot-badge ${s.recommended ? "rec" : "norm"}">${escapeHtml(s.badge || "SLOT")}</span>
         </div>
-        <div class="slot-note">${s.note || ""}</div>
+        <div class="slot-note">${escapeHtml(s.note || "")}</div>
       `;
       card.addEventListener("click", () => {
         state.injectSlot = s.slot_id;
@@ -2136,7 +2138,7 @@ async function refreshSteamModalList() {
       box.appendChild(row);
     }
   } catch (err) {
-    box.innerHTML = `<div class="mono-sub">${err.message}</div>`;
+    box.innerHTML = `<div class="mono-sub">${escapeHtml(err.message || "Lỗi không xác định")}</div>`;
   }
 }
 
@@ -2285,6 +2287,15 @@ function setupSSE() {
       }
     } catch (_) {}
   };
+}
+
+function safeCoverUrl(u) {
+  const s = String(u || "").trim();
+  if (!s) return "";
+  if (s.startsWith("/covers/") || /^https?:\/\//i.test(s)) {
+    return s.replaceAll("'", "%27").replaceAll('"', "%22").replaceAll(")", "%29");
+  }
+  return "";
 }
 
 function escapeHtml(s) {

@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -119,6 +120,29 @@ _SINGLE_INSTANCE_MUTEX_NAME = "Local\\SakugaLocalizationLauncher_SingleInstance_
 _INSTANCE_LOCK_PATH = APP_DIR / ".instance_lock.json"
 
 
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+_MAX_COVER_BYTES = 10 * 1024 * 1024
+_MAX_SAKUGAPACK_BYTES = 32 * 1024 * 1024
+
+
+def _validate_safe_id(value: str, label: str = "ID") -> str:
+    clean = (value or "").strip()
+    if not clean or ".." in clean or not _SAFE_ID_RE.match(clean):
+        raise HTTPException(status_code=400, detail=f"{label} không hợp lệ.")
+    return clean
+
+
+def _safe_zip_read_limited(zf: zipfile.ZipFile, member_name: str, max_bytes: int) -> bytes:
+    info = zf.getinfo(member_name)
+    if info.file_size > max_bytes:
+        raise ValueError(f"File nén '{member_name}' vượt quá giới hạn an toàn ({max_bytes // (1024 * 1024)} MB).")
+    with zf.open(info, "r") as fp:
+        data = fp.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f"Dữ liệu giải nén '{member_name}' vượt quá giới hạn cho phép.")
+    return data
+
+
 def _any_job_running() -> bool:
     return any(st.get("status") == "running" for st in _job_states.values())
 
@@ -196,10 +220,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Black Sakura Translate", lifespan=lifespan)
+_LOCAL_ORIGIN_RE = re.compile(r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$", re.IGNORECASE)
+
+
+@app.middleware("http")
+async def _origin_csrf_guard(request, call_next):
+    origin = (request.headers.get("origin") or "").strip()
+    if origin and origin.lower() != "null" and not _LOCAL_ORIGIN_RE.match(origin):
+        return JSONResponse(status_code=403, content={"detail": "Cross-origin requests from external sites are blocked."})
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$",
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
@@ -649,6 +684,7 @@ async def api_get_game(game_id: str):
 
 @app.delete("/api/games/{game_id}")
 async def api_delete_game(game_id: str):
+    game_id = _validate_safe_id(game_id, "game_id")
     game = library_db.get_game(game_id)
     library_db.delete_game(game_id)
     gdir = (game or {}).get("game_dir") or ""
@@ -712,15 +748,22 @@ async def api_fetch_steam_context(game_id: str):
 
 @app.post("/api/games/{game_id}/cover")
 async def api_upload_cover(game_id: str, file: UploadFile = File(...)):
+    game_id = _validate_safe_id(game_id, "game_id")
     game = library_db.get_game(game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
+    raw_cover = await file.read(_MAX_COVER_BYTES + 1)
+    if len(raw_cover) > _MAX_COVER_BYTES:
+        raise HTTPException(status_code=413, detail="Ảnh bìa vượt quá giới hạn 10 MB.")
+    is_png = raw_cover.startswith(b"\x89PNG\r\n\x1a\n")
+    is_jpg = raw_cover.startswith(b"\xff\xd8\xff")
+    is_webp = len(raw_cover) >= 12 and raw_cover[:4] == b"RIFF" and raw_cover[8:12] == b"WEBP"
+    if not (is_png or is_jpg or is_webp):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ định dạng ảnh PNG, JPG hoặc WEBP hợp lệ.")
     COVERS_DIR.mkdir(parents=True, exist_ok=True)
-    ext = Path(file.filename or "cover.jpg").suffix.lower()
-    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
-        ext = ".jpg"
+    ext = ".png" if is_png else ".webp" if is_webp else ".jpg"
     dest = COVERS_DIR / f"{game_id}{ext}"
-    dest.write_bytes(await file.read())
+    dest.write_bytes(raw_cover)
     library_db.update_fields(game_id, cover_path=str(dest))
     return {"ok": True, "cover_url": f"/covers/{dest.name}?t={int(time.time())}"}
 
@@ -861,9 +904,13 @@ async def api_restore_game(game_id: str):
 
 @app.post("/api/games/{game_id}/open-backup")
 async def api_open_backup_dir(game_id: str):
+    game_id = _validate_safe_id(game_id, "game_id")
     game = library_db.get_game(game_id)
     info = backup_mgr.get_backup_info(game_id, game.get("game_dir") if game else None)
-    bdir = Path(info["backup_dir"])
+    bdir = Path(info["backup_dir"]).resolve()
+    backups_root = (APP_DIR / "backups").resolve()
+    if not bdir.is_relative_to(backups_root):
+        raise HTTPException(status_code=400, detail="Đường dẫn thư mục backup không hợp lệ.")
     bdir.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
         os.startfile(str(bdir))
@@ -1818,6 +1865,7 @@ async def api_export_sakugapack(game_id: str, source_lang: Optional[str] = None,
 
 @app.post("/api/games/{game_id}/sakugapack/import")
 async def api_import_sakugapack(game_id: str, req: SakugaPackImportRequest):
+    game_id = _validate_safe_id(game_id, "game_id")
     game = library_db.get_game(game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
@@ -1825,8 +1873,12 @@ async def api_import_sakugapack(game_id: str, req: SakugaPackImportRequest):
         raise HTTPException(status_code=409, detail="Tiến trình cho game này đang chạy.")
 
     b64_data = req.content_b64.split(",", 1)[1] if "," in req.content_b64 else req.content_b64
+    if len(b64_data) > int(_MAX_SAKUGAPACK_BYTES * 1.4):
+        raise HTTPException(status_code=413, detail="Gói .sakugapack vượt quá giới hạn 32 MB.")
     try:
         raw_bytes = base64.b64decode(b64_data)
+        if len(raw_bytes) > _MAX_SAKUGAPACK_BYTES:
+            raise ValueError("Gói .sakugapack vượt quá giới hạn 32 MB.")
         if raw_bytes[:2] == b"PK":
             with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as zf:
                 target_name = "pack.json" if "pack.json" in zf.namelist() else next(
@@ -1834,7 +1886,8 @@ async def api_import_sakugapack(game_id: str, req: SakugaPackImportRequest):
                 )
                 if not target_name:
                     raise ValueError("File .sakugapack không chứa pack.json.")
-                pack = json.loads(zf.read(target_name).decode("utf-8"))
+                json_bytes = _safe_zip_read_limited(zf, target_name, _MAX_SAKUGAPACK_BYTES)
+                pack = json.loads(json_bytes.decode("utf-8"))
         else:
             pack = json.loads(raw_bytes.decode("utf-8"))
     except ValueError:
@@ -2047,9 +2100,6 @@ async def api_ollama_pull(req: PullModelRequest):
 @app.post("/api/ollama/launch")
 async def api_ollama_launch():
     """Attempt to launch local Ollama desktop app or background server for first-time users."""
-    import shutil
-    import subprocess
-
     cur = await qwen_engine.check_ollama_status()
     if cur.get("online"):
         return {"ok": True, "already_running": True, "installed": True, "online": True, "ollama": cur}

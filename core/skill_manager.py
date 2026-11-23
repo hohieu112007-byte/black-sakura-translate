@@ -362,17 +362,31 @@ class SkillManager:
         return f"{item['id']}.md", "text/markdown; charset=utf-8", md_bytes
 
     def import_skill(self, filename: str, raw_bytes: bytes) -> Dict[str, Any]:
+        max_bytes = 2 * 1024 * 1024
+        if len(raw_bytes) > max_bytes:
+            raise ValueError("File Skill vượt quá giới hạn 2 MB.")
         fn_low = (filename or "").lower()
         md_content = ""
         imported_glossary: List[Dict[str, str]] = []
 
         if fn_low.endswith(".zip"):
             with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as zf:
-                for nm in zf.namelist():
+                for info in zf.infolist():
+                    nm = info.filename
+                    if info.file_size > max_bytes:
+                        raise ValueError(f"Thành phần '{nm}' trong ZIP vượt quá giới hạn 2 MB.")
                     if nm.lower().endswith(".md") and not md_content:
-                        md_content = zf.read(nm).decode("utf-8", errors="replace")
+                        with zf.open(info, "r") as fp:
+                            data = fp.read(max_bytes + 1)
+                        if len(data) > max_bytes:
+                            raise ValueError("File Markdown trong ZIP vượt quá giới hạn 2 MB.")
+                        md_content = data.decode("utf-8", errors="replace")
                     elif nm.lower().endswith(".csv"):
-                        txt = zf.read(nm).decode("utf-8-sig", errors="replace")
+                        with zf.open(info, "r") as fp:
+                            data = fp.read(max_bytes + 1)
+                        if len(data) > max_bytes:
+                            raise ValueError("File CSV trong ZIP vượt quá giới hạn 2 MB.")
+                        txt = data.decode("utf-8-sig", errors="replace")
                         reader = csv.DictReader(io.StringIO(txt))
                         for row in reader:
                             if row.get("source_term") and row.get("target_term"):

@@ -22,6 +22,17 @@ def sha1_text(text: str) -> str:
     return hashlib.sha1((text or "").encode("utf-8")).hexdigest()
 
 
+_ALLOWED_GAME_COLUMNS = {
+    "title", "game_dir", "exe_path", "steam_appid", "launch_mode", "shortcut_path",
+    "cover_path", "game_description", "compiled_style_card", "tone_preset",
+    "style_skill_id", "lang_skill_override", "engine", "method",
+    "anticheat_status", "anticheat_vendors", "anticheat_files", "detected_slots_json",
+    "source_lang", "target_lang", "inject_slot", "preset_level", "scope", "ai_mode",
+    "translate_choices", "keep_proper_nouns", "patch_fonts", "total_strings",
+    "translated_strings", "progress_pct", "is_patched", "last_played_at", "updated_at",
+}
+
+
 class LibraryDB:
     """Manages <app_dir>/library.db storing games, launch profiles, and Anti-Cheat state."""
 
@@ -188,6 +199,8 @@ class LibraryDB:
         fields["updated_at"] = int(time.time())
         serialized: Dict[str, Any] = {}
         for k, v in fields.items():
+            if k not in _ALLOWED_GAME_COLUMNS:
+                raise ValueError(f"Unsupported game column: {k}")
             if k in ("anticheat_vendors", "anticheat_files", "detected_slots_json") and not isinstance(v, str):
                 serialized[k] = json.dumps(v, ensure_ascii=False)
             else:
