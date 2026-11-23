@@ -476,18 +476,33 @@ class QwenEngine:
         if st["online"]:
             return True
         ollama_bin = shutil.which("ollama")
-        if not ollama_bin:
-            candidate = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
-            if candidate.exists():
-                ollama_bin = str(candidate)
+        if not ollama_bin and os.name == "nt":
+            for cand in (
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe",
+                Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Ollama" / "ollama.exe",
+            ):
+                if cand.exists() and cand.is_file():
+                    ollama_bin = str(cand)
+                    break
         if not ollama_bin:
             return False
         env = os.environ.copy()
         env.update(self.profiler.apply_ollama_env())
-        flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
+        flags = (
+            (subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+            if os.name == "nt"
+            else 0
+        )
         try:
-            subprocess.Popen([ollama_bin, "serve"], env=env, creationflags=flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for _ in range(12):
+            subprocess.Popen(
+                [ollama_bin, "serve"],
+                env=env,
+                creationflags=flags,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            for _ in range(14):
                 await asyncio.sleep(0.5)
                 if (await self.check_ollama_status())["online"]:
                     return True

@@ -115,7 +115,7 @@ _tray_balloon_shown: bool = False
 _instance_mutex_handle: Optional[int] = None
 
 _APP_TITLE = "Black Sakura Translate"
-_APP_VERSION = "1.0.0"
+_APP_VERSION = "1.0.1"
 _GITHUB_REPO = "hohieu112007-byte/black-sakura-translate"
 _GITHUB_RELEASES_API = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
 _GITHUB_RELEASES_PAGE = f"https://github.com/{_GITHUB_REPO}/releases"
@@ -219,6 +219,12 @@ async def lifespan(app: FastAPI):
                 emit_sse("tool_progress", info)
             await tool_boot.ensure_all(force=False, progress_cb=_cb)
             emit_sse("tool_status", tool_boot.get_status())
+        # Silently wake installed Ollama headless server on startup so users don't need to open Ollama manually
+        try:
+            if await qwen_engine.ensure_ollama_running():
+                emit_sse("tool_status", tool_boot.get_status())
+        except Exception:
+            pass
 
     asyncio.create_task(_initial_bootstrap())
     yield
@@ -2602,14 +2608,17 @@ async def api_ollama_launch():
         return {"ok": True, "already_running": True, "installed": True, "online": True, "ollama": cur}
 
     candidates = []
-    if os.name == "nt":
-        local_app = os.environ.get("LOCALAPPDATA", "")
-        if local_app:
-            candidates.append((Path(local_app) / "Programs" / "Ollama" / "ollama app.exe", []))
-            candidates.append((Path(local_app) / "Programs" / "Ollama" / "ollama.exe", ["serve"]))
     cli_path = shutil.which("ollama")
     if cli_path:
         candidates.append((Path(cli_path), ["serve"]))
+    if os.name == "nt":
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        prog_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        if local_app:
+            candidates.append((Path(local_app) / "Programs" / "Ollama" / "ollama.exe", ["serve"]))
+            candidates.append((Path(local_app) / "Programs" / "Ollama" / "ollama app.exe", []))
+        if prog_files:
+            candidates.append((Path(prog_files) / "Ollama" / "ollama.exe", ["serve"]))
 
     chosen = next(((p, extra) for p, extra in candidates if p.exists() and p.is_file()), None)
     if not chosen:
@@ -2623,7 +2632,10 @@ async def api_ollama_launch():
 
     exe_path, extra_args = chosen
     try:
+        env = os.environ.copy()
+        env.update(hw_profiler.apply_ollama_env())
         kwargs: Dict[str, Any] = {
+            "env": env,
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
             "stdin": subprocess.DEVNULL,

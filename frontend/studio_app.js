@@ -37,7 +37,7 @@ const state = {
   skills: { languages: [], styles: [] },
   skillCatalogLayer: "styles",
   editingSkill: null,
-  appVersion: "1.0.0",
+  appVersion: "1.0.1",
   autoCheckUpdates: true,
   appUpdateInfo: null,
   lastJobError: null,
@@ -753,14 +753,25 @@ async function checkAppUpdate(force = false) {
     state.appUpdateInfo = data;
     if (data.current_version) state.appVersion = data.current_version;
     renderAppUpdateUI();
+    const isEn = state.uiLang === "en";
     if (force) {
-      const isEn = state.uiLang === "en";
       if (data.update_available) {
         openAppUpdateModal();
       } else if (data.ok) {
         showToast(isEn ? `You are on the latest version (v${state.appVersion}) ✓` : `Bạn đang dùng bản mới nhất (v${state.appVersion}) ✓`);
       } else {
         showToast(isEn ? "Could not check GitHub right now (offline/timeout)." : "Chưa kết nối được GitHub để kiểm tra cập nhật.", "error");
+      }
+    } else if (data.update_available) {
+      const tag = data.latest_tag || `v${data.latest_version || ""}`;
+      showToast(
+        isEn
+          ? `⬆ New update ${tag} is available! Click to update in 1-Click.`
+          : `⬆ Đã có phiên bản mới ${tag}! Bấm để cập nhật tự động 1-Click.`
+      );
+      const dismissedTag = localStorage.getItem("sakuga_dismissed_update_tag") || "";
+      if (dismissedTag !== tag) {
+        openAppUpdateModal();
       }
     }
   } catch (_) {
@@ -1795,12 +1806,20 @@ async function runTranslationWithPreset(presetKey = null) {
   if (!g) return;
   if (presetKey) applyPresetLevel(presetKey, true);
 
-  // Friendly pre-flight check so first-time users know exactly how to connect Ollama / pull a model
+  // Auto-wake installed Ollama silently if user closed Ollama Desktop before clicking Translate
   if (!state.ollamaStatus || !state.ollamaStatus.online || state.ollamaStatus.selected_installed === false) {
     await refreshHealth();
   }
   if (!state.ollamaStatus?.online) {
-    showToast("Ollama chưa chạy! Hãy bấm 'Mở Ollama ngay' hoặc 'Tải Ollama' trong cửa sổ vừa mở.", "error");
+    try {
+      showToast(state.uiLang === "en" ? "Starting local Ollama engine in background..." : "Đang tự khởi động ngầm máy chủ Ollama...");
+      const wake = await api("/api/ollama/launch", { method: "POST" });
+      if (wake?.ollama) state.ollamaStatus = wake.ollama;
+      await refreshHealth();
+    } catch (_) {}
+  }
+  if (!state.ollamaStatus?.online) {
+    showToast("Chưa khởi động được Ollama! Hãy cài đặt miễn phí tại ollama.com hoặc bấm 'Mở Ollama ngay'.", "error");
     openHardwareModal();
     return;
   }
@@ -3014,8 +3033,15 @@ function bindEvents() {
   $("appUpdatePill")?.addEventListener("click", openAppUpdateModal);
   $("btnCheckAppUpdate")?.addEventListener("click", () => checkAppUpdate(true));
   $("btnOpenUpdateModal")?.addEventListener("click", openAppUpdateModal);
-  $("btnCloseUpdateModal")?.addEventListener("click", () => $("modalAppUpdate")?.classList.add("hidden"));
-  $("btnDismissUpdateModal")?.addEventListener("click", () => $("modalAppUpdate")?.classList.add("hidden"));
+  const _dismissUpdateModal = () => {
+    const tag = state.appUpdateInfo?.latest_tag || "";
+    if (tag && state.appUpdateInfo?.update_available) {
+      localStorage.setItem("sakuga_dismissed_update_tag", tag);
+    }
+    $("modalAppUpdate")?.classList.add("hidden");
+  };
+  $("btnCloseUpdateModal")?.addEventListener("click", _dismissUpdateModal);
+  $("btnDismissUpdateModal")?.addEventListener("click", _dismissUpdateModal);
   $("btnOpenGitHubRelease")?.addEventListener("click", () => {
     openAppReleasePage();
   });
