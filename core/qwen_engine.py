@@ -488,19 +488,16 @@ class QwenEngine:
             return False
         env = os.environ.copy()
         env.update(self.profiler.apply_ollama_env())
-        flags = (
-            (subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
-            if os.name == "nt"
-            else 0
-        )
+        from core import hidden_subprocess_kwargs
+        win_kw = hidden_subprocess_kwargs(detached_group=True)
         try:
             subprocess.Popen(
                 [ollama_bin, "serve"],
                 env=env,
-                creationflags=flags,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                **win_kw,
             )
             for _ in range(14):
                 await asyncio.sleep(0.5)

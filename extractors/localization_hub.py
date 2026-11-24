@@ -163,7 +163,8 @@ def _scan_rpa_tl_archives(game_dir: Path) -> List[Dict[str, Any]]:
     if not RPATOOL_PATH.exists():
         return []
     tl_slots: Dict[str, Dict[str, Any]] = {}
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    from core import hidden_subprocess_kwargs
+    win_kw = hidden_subprocess_kwargs()
     for rpa in game_dir.rglob("*.rpa"):
         try:
             proc = subprocess.run(
@@ -172,8 +173,8 @@ def _scan_rpa_tl_archives(game_dir: Path) -> List[Dict[str, Any]]:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                creationflags=creationflags,
                 timeout=20,
+                **win_kw,
             )
             if proc.returncode != 0:
                 continue

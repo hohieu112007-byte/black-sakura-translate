@@ -41,6 +41,7 @@ if str(APP_DIR) not in sys.path:
 if str(BUNDLE_DIR) not in sys.path:
     sys.path.insert(0, str(BUNDLE_DIR))
 
+from core import hidden_subprocess_kwargs
 from core.atomic_io import atomic_write_text, cleanup_orphaned_temps
 from core.database import GameCacheDB, GlobalTMDB, LibraryDB
 from core.hardware_profiler import HardwareProfiler
@@ -821,6 +822,7 @@ async def api_apply_app_update(req: ApplyAppUpdateRequest):
                 capture_output=True,
                 text=True,
                 timeout=10,
+                **hidden_subprocess_kwargs(),
             )
             if st.returncode != 0:
                 return {"ok": False, "mode": "git_pull", "message": "Không đọc được trạng thái Git."}
@@ -836,6 +838,7 @@ async def api_apply_app_update(req: ApplyAppUpdateRequest):
                 capture_output=True,
                 text=True,
                 timeout=45,
+                **hidden_subprocess_kwargs(),
             )
             if pull.returncode != 0:
                 return {
@@ -914,13 +917,13 @@ async def api_apply_app_update(req: ApplyAppUpdateRequest):
             emit_sse("app_update_progress", {"stage": "restarting", "pct": 100, "message": "Đang áp dụng bản mới & khởi động lại app..."})
             await asyncio.sleep(0.5)
 
-            flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
             subprocess.Popen(
                 ["cmd.exe", "/c", str(script_path)],
                 cwd=str(staging_dir),
-                creationflags=flags,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                **hidden_subprocess_kwargs(detached_group=True),
             )
 
             def _graceful_exit() -> None:
@@ -2641,10 +2644,10 @@ async def api_ollama_launch():
             "stdin": subprocess.DEVNULL,
         }
         if os.name == "nt":
-            flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
             if extra_args:
-                flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-            kwargs["creationflags"] = flags
+                kwargs.update(hidden_subprocess_kwargs(detached_group=True))
+            else:
+                kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
         subprocess.Popen([str(exe_path), *extra_args], **kwargs)
     except Exception as exc:
         return {

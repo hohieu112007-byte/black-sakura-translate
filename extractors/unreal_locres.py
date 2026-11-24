@@ -263,7 +263,7 @@ def _normalize_ue_lang(raw: str) -> str:
 
 
 def _run_tool(cmd: List[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    from core import hidden_subprocess_kwargs
     return subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
@@ -271,8 +271,8 @@ def _run_tool(cmd: List[str], cwd: Optional[Path] = None) -> subprocess.Complete
         text=True,
         encoding="utf-8",
         errors="replace",
-        creationflags=creationflags,
         timeout=90,
+        **hidden_subprocess_kwargs(),
     )
 
 

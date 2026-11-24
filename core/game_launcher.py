@@ -226,15 +226,15 @@ def parse_windows_lnk_file(lnk_path: Path) -> Dict[str, str]:
         f"$sc = $sh.CreateShortcut('{str(lnk_path).replace(chr(39), chr(39)*2)}'); "
         "Write-Output ($sc.TargetPath + '|' + $sc.WorkingDirectory + '|' + $sc.Arguments)"
     )
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    from core import hidden_subprocess_kwargs
     proc = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", ps_script],
+        ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        creationflags=creationflags,
         timeout=10,
+        **hidden_subprocess_kwargs(),
     )
     if proc.returncode != 0 or "|" not in proc.stdout:
         raise ValueError(f"Không thể đọc shortcut .lnk: {proc.stderr}")
