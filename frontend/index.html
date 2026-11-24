@@ -660,8 +660,8 @@
 
               <div class="settings-row">
                 <div>
-                  <strong data-i18n="set_tray_title">Ẩn xuống khay hệ thống khi Thu nhỏ / Đóng (X)</strong>
-                  <div class="mono-mini" data-i18n="set_tray_desc">Giữ cửa sổ chạy ngầm ở khay khi thu nhỏ hoặc lỡ bấm X lúc đang dịch / fix lỗi</div>
+                  <strong data-i18n="set_tray_title">Ẩn xuống khay hệ thống khi Thu nhỏ (-)</strong>
+                  <div class="mono-mini" data-i18n="set_tray_desc">Chỉ thu gọn xuống khay khi bấm Thu nhỏ (-) hoặc nút ▾ Ẩn khay; nút X luôn đóng hẳn app (có hỏi nếu đang dịch)</div>
                 </div>
                 <sakuga-toggle id="chkMinimizeToTray" label="Ẩn xuống khay" checked></sakuga-toggle>
               </div>
@@ -1051,6 +1051,27 @@
         <div class="modal-actions modal-actions-end" style="gap:8px;">
           <button id="btnCopyErrorReport" type="button" class="btn btn-outline btn-sm" data-i18n="btn_copy_error">📋 Copy lỗi</button>
           <sakuga-button id="btnDismissErrorModal" data-i18n="btn_close">Đóng</sakuga-button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Confirm Exit While Translating -->
+  <div id="modalConfirmExit" class="modal hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-head">
+        <h3 data-i18n="modal_exit_title">⚠ APP ĐANG DỊCH / XỬ LÝ DỮ LIỆU</h3>
+        <button id="btnCloseConfirmExitModal" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <p id="confirmExitDesc" style="margin:0;line-height:1.5;font-size:13px;" data-i18n="modal_exit_desc">
+          Tiến trình dịch vẫn đang chạy! Nếu đóng hẳn app ngay lúc này, các câu đã dịch đã được lưu an toàn trong SQLite để lần sau mở lại chạy tiếp.
+        </p>
+        <div id="confirmExitProgressChip" class="slot-guide-box" style="margin-top:4px;">Đang chạy tiến trình...</div>
+        <div class="modal-actions modal-actions-end" style="gap:8px;flex-wrap:wrap;">
+          <button id="btnCancelConfirmExit" type="button" class="btn btn-outline btn-sm" data-i18n="btn_stay_translate">Ở lại tiếp tục dịch</button>
+          <button id="btnHideTrayInstead" type="button" class="btn btn-ghost btn-sm" data-i18n="btn_hide_tray_instead">▾ Ẩn xuống khay</button>
+          <button id="btnConfirmExitNow" type="button" class="btn btn-danger-outline btn-sm" data-i18n="btn_confirm_exit_now">✕ Đóng hẳn app</button>
         </div>
       </div>
     </div>

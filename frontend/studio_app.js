@@ -3284,6 +3284,40 @@ function bindEvents() {
   });
   $("btnCloseErrorModal")?.addEventListener("click", () => $("modalErrorReport")?.classList.add("hidden"));
   $("btnDismissErrorModal")?.addEventListener("click", () => $("modalErrorReport")?.classList.add("hidden"));
+
+  let _confirmedExitBypassUnload = false;
+  window.openExitConfirmModal = () => {
+    const modal = $("modalConfirmExit");
+    if (!modal) return false;
+    const g = selectedGame();
+    const taskTxt = ($("progLiveTask")?.textContent || "").trim();
+    const pctTxt = ($("statProgressMini")?.textContent || "").trim();
+    const chip = $("confirmExitProgressChip");
+    if (chip) {
+      const label = [g?.title, pctTxt, taskTxt].filter(Boolean).join(" • ");
+      chip.textContent = label || (state.uiLang === "en" ? "Job running..." : "Đang chạy tiến trình...");
+    }
+    modal.classList.remove("hidden");
+    return true;
+  };
+  const _closeExitConfirmModal = () => $("modalConfirmExit")?.classList.add("hidden");
+  $("btnCloseConfirmExitModal")?.addEventListener("click", _closeExitConfirmModal);
+  $("btnCancelConfirmExit")?.addEventListener("click", _closeExitConfirmModal);
+  $("btnHideTrayInstead")?.addEventListener("click", () => {
+    _closeExitConfirmModal();
+    api("/api/ui/hide-to-tray", { method: "POST" }).catch(() => {});
+  });
+  $("btnConfirmExitNow")?.addEventListener("click", async () => {
+    _confirmedExitBypassUnload = true;
+    _closeExitConfirmModal();
+    await api("/api/ui/exit", { method: "POST" }).catch(() => {});
+  });
+  window.addEventListener("beforeunload", (e) => {
+    if (!_confirmedExitBypassUnload && state.jobRunning) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
   $("btnCopyErrorReport")?.addEventListener("click", () => {
     if (!state.lastJobError) return;
     const e = state.lastJobError;

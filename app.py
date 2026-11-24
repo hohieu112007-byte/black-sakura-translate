@@ -110,8 +110,10 @@ font_patcher = FontPatcher(APP_DIR / "tools" / "fonts")
 _job_states: Dict[str, Dict[str, Any]] = {}
 _sse_queues: Set[asyncio.Queue] = set()
 _wv_window = None
+_active_server = None
 _tray_controller: Optional[WinSystemTray] = None
 _force_app_exit: bool = False
+_page_loaded: bool = False
 _tray_balloon_shown: bool = False
 _instance_mutex_handle: Optional[int] = None
 
@@ -151,6 +153,23 @@ def _safe_zip_read_limited(zf: zipfile.ZipFile, member_name: str, max_bytes: int
 
 def _any_job_running() -> bool:
     return any(st.get("status") == "running" for st in _job_states.values())
+
+
+def _perform_full_exit(destroy_window: bool = True) -> None:
+    global _force_app_exit
+    _force_app_exit = True
+    if _active_server is not None:
+        _active_server.should_exit = True
+    if _tray_controller is not None:
+        try:
+            _tray_controller.stop()
+        except Exception:
+            pass
+    if destroy_window and _wv_window is not None:
+        try:
+            _wv_window.destroy()
+        except Exception:
+            pass
 
 
 def _restore_window_from_tray() -> None:
@@ -977,6 +996,13 @@ async def api_hide_to_tray():
         return {"ok": False, "tray_active": False}
     threading.Thread(target=lambda: _hide_window_to_tray(True), daemon=True).start()
     return {"ok": True, "tray_active": True}
+
+
+@app.post("/api/ui/exit")
+async def api_ui_exit():
+    if _wv_window is not None or _active_server is not None:
+        threading.Thread(target=lambda: _perform_full_exit(destroy_window=True), daemon=True).start()
+    return {"ok": True, "exiting": True}
 
 
 @app.get("/api/ui/identity")
@@ -3117,7 +3143,7 @@ def _unblock_bundled_dotnet_assemblies() -> None:
 
 
 def main() -> None:
-    global _wv_window, _tray_controller, _force_app_exit, _instance_mutex_handle
+    global _wv_window, _active_server, _tray_controller, _force_app_exit, _page_loaded, _instance_mutex_handle
     import argparse
 
     parser = argparse.ArgumentParser(description="Black Sakura Translate — Local AI Game Localization Launcher")
@@ -3137,6 +3163,7 @@ def main() -> None:
 
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", log_config=None)
     server = uvicorn.Server(config)
+    _active_server = server
     t = threading.Thread(target=server.run, daemon=True)
     t.start()
 
@@ -3191,31 +3218,23 @@ def main() -> None:
         return
 
     def _request_full_exit() -> None:
-        global _force_app_exit
         if _any_job_running() and os.name == "nt":
             try:
                 import ctypes
+                hwnd = ctypes.windll.user32.FindWindowW(None, _APP_TITLE) or 0
                 ans = ctypes.windll.user32.MessageBoxW(
-                    0,
+                    hwnd,
                     "Đang có tiến trình Dịch hoặc Fix lỗi đang chạy ngầm!\n"
                     "Nếu thoát hẳn lúc này, các câu đã dịch đã được lưu an toàn trong SQLite để lần sau mở app tự động chạy tiếp.\n\n"
                     "Bạn có chắc chắn muốn thoát hẳn?",
                     "Black Sakura Translate // Cảnh báo tiến trình đang chạy",
-                    0x00000004 | 0x00000030,  # MB_YESNO | MB_ICONWARNING
+                    0x00000004 | 0x00000030 | 0x00010000,  # MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND
                 )
                 if ans != 6:  # IDYES
                     return
             except Exception:
                 pass
-        _force_app_exit = True
-        server.should_exit = True
-        if _tray_controller is not None:
-            _tray_controller.stop()
-        if _wv_window is not None:
-            try:
-                _wv_window.destroy()
-            except Exception:
-                pass
+        _perform_full_exit(destroy_window=True)
 
     def _open_from_tray() -> None:
         if _wv_window is not None:
@@ -3251,10 +3270,40 @@ def main() -> None:
         def _on_closing():
             if _force_app_exit:
                 return True
-            min_pref = library_db.get_setting("minimize_to_tray", "1") == "1"
-            if _any_job_running() or min_pref:
-                threading.Thread(target=lambda: _hide_window_to_tray(True), daemon=True).start()
+            if _any_job_running():
+                def _prompt_close_when_busy():
+                    opened = False
+                    if _page_loaded and _wv_window is not None:
+                        try:
+                            opened = bool(
+                                _wv_window.evaluate_js("Boolean(window.openExitConfirmModal && window.openExitConfirmModal())")
+                            )
+                        except Exception:
+                            opened = False
+                    if opened:
+                        return
+                    if os.name == "nt":
+                        try:
+                            import ctypes
+                            hwnd = ctypes.windll.user32.FindWindowW(None, _APP_TITLE) or 0
+                            ans = ctypes.windll.user32.MessageBoxW(
+                                hwnd,
+                                "App đang chạy tiến trình Dịch / Fix lỗi!\n"
+                                "Nếu đóng hẳn lúc này, các câu đã dịch vẫn được lưu an toàn trong SQLite để lần sau chạy tiếp.\n\n"
+                                "Bạn có chắc chắn muốn đóng hẳn app không?",
+                                "Black Sakura Translate // Xác nhận đóng app",
+                                0x00000004 | 0x00000030 | 0x00010000,  # MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND
+                            )
+                            if ans != 6:
+                                return
+                        except Exception:
+                            pass
+                    _perform_full_exit(destroy_window=True)
+
+                threading.Thread(target=_prompt_close_when_busy, daemon=True).start()
                 return False
+            # Idle state: X button exits completely (never hides to tray)
+            _perform_full_exit(destroy_window=False)
             return True
 
         def _on_minimized():
@@ -3262,6 +3311,9 @@ def main() -> None:
                 threading.Thread(target=lambda: _hide_window_to_tray(True), daemon=True).start()
 
         def _on_loaded():
+            global _page_loaded
+            _page_loaded = True
+
             def _on_drop(e):
                 files = e.get("dataTransfer", {}).get("files", [])
                 paths = [f.get("pywebviewFullPath") for f in files if f.get("pywebviewFullPath")]
@@ -3282,9 +3334,8 @@ def main() -> None:
         _wv_window = None
         _run_browser_fallback()
     finally:
-        if _tray_controller is not None:
-            _tray_controller.stop()
-        server.should_exit = True
+        _perform_full_exit(destroy_window=False)
+        _active_server = None
         release_single_instance_lock(_instance_mutex_handle)
         _instance_mutex_handle = None
 
