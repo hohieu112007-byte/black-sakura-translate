@@ -268,6 +268,8 @@ class ScanRequest(BaseModel):
 class SlotRankRequest(BaseModel):
     source_lang: str = "en"
     target_lang: str = "vi"
+    current_inject_slot: Optional[str] = None
+    persist: bool = False
 
 
 class UpdateProfileRequest(BaseModel):
@@ -284,6 +286,12 @@ class UpdateProfileRequest(BaseModel):
     inject_slot: Optional[str] = None
     source_lang: Optional[str] = None
     target_lang: Optional[str] = None
+    scope: Optional[str] = None
+    preset_level: Optional[str] = None
+    ai_mode: Optional[str] = None
+    translate_choices: Optional[bool] = None
+    keep_proper_nouns: Optional[bool] = None
+    patch_fonts: Optional[bool] = None
 
 
 class StartTranslateRequest(BaseModel):
@@ -1217,6 +1225,9 @@ async def api_update_profile(game_id: str, req: UpdateProfileRequest):
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    for bool_col in ("translate_choices", "keep_proper_nouns", "patch_fonts"):
+        if bool_col in updates:
+            updates[bool_col] = 1 if updates[bool_col] else 0
     if "style_skill_id" in updates and "tone_preset" not in updates:
         updates["tone_preset"] = updates["style_skill_id"]
     elif "tone_preset" in updates and "style_skill_id" not in updates:
@@ -1279,7 +1290,20 @@ async def api_rank_slots(game_id: str, req: SlotRankRequest):
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     ranked = rank_inject_slots(game.get("detected_slots", []), req.source_lang, req.target_lang)
-    return {"ranked_slots": ranked}
+    valid_ids = {s["slot_id"] for s in ranked}
+    cur_slot = (req.current_inject_slot or game.get("inject_slot") or "").strip()
+    if cur_slot and cur_slot in valid_ids and (cur_slot.lower() != req.source_lang.lower() or len(ranked) == 1):
+        chosen_slot = cur_slot
+    else:
+        chosen_slot = ranked[0]["slot_id"] if ranked else (cur_slot or req.source_lang)
+    if req.persist:
+        library_db.update_fields(
+            game_id,
+            source_lang=req.source_lang,
+            target_lang=req.target_lang,
+            inject_slot=chosen_slot,
+        )
+    return {"ranked_slots": ranked, "inject_slot": chosen_slot}
 
 
 @app.post("/api/games/{game_id}/scan")
@@ -1754,6 +1778,11 @@ async def api_translate_start(req: StartTranslateRequest):
         target_lang=req.target_lang,
         inject_slot=req.inject_slot,
         scope=req.scope,
+        preset_level=(req.preset_level or "CUSTOM"),
+        ai_mode=req.ai_mode,
+        translate_choices=1 if req.translate_choices else 0,
+        keep_proper_nouns=1 if req.keep_proper_nouns else 0,
+        patch_fonts=1 if req.patch_fonts else 0,
         style_skill_id=eff_style,
         tone_preset=eff_style,
         lang_skill_override=eff_lang_ov,

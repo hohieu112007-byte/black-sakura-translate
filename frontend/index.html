@@ -239,15 +239,22 @@
         <!-- SUBTAB 1: MINIMALIST ESSENTIALS (DEFAULT!) -->
         <div id="paneOverview" class="subtab-pane active">
           <div class="overview-grid">
-            <!-- Left Minimalist Card: Unified Language/Slot + 3 Presets -->
+            <!-- Left Minimalist Card: Friendly Step-by-Step Basic Config -->
             <div class="panel-card">
               <div class="card-header">
-                <span class="section-label" data-i18n="basic_cfg_title">CẤU HÌNH CƠ BẢN</span>
+                <div class="header-title-with-tip">
+                  <span class="section-label" data-i18n="basic_cfg_title">CẤU HÌNH CƠ BẢN</span>
+                  <span id="cfgSavedPill" class="cfg-saved-pill" title="Mọi thay đổi được tự động lưu riêng cho từng game">✓ Tự nhớ</span>
+                </div>
                 <button id="btnLinkToFullSettings" type="button" class="btn btn-ghost btn-sm cfg-link-btn" data-i18n="btn_custom_slot_scope">⚙ Cài đặt đầy đủ ➔</button>
               </div>
 
-              <!-- Unified Language Pair + Inject Slot Surface (Mirrors Full Settings) -->
+              <!-- Step 1: Language Pair + Inject Slot Surface (Mirrors Full Settings) -->
               <div class="lang-slot-box">
+                <div class="step-heading">
+                  <span class="step-num">1</span>
+                  <span class="step-title" data-i18n="step1_lang_title">Chọn ngôn ngữ dịch &amp; chỗ chèn trong game</span>
+                </div>
                 <div class="basic-lang-bar">
                   <div class="basic-lang-item">
                     <label for="selectSourceLang" data-i18n="lbl_src_lang">Ngôn ngữ gốc</label>
@@ -301,11 +308,12 @@
                 </div>
               </div>
 
-              <!-- 3-Tier Preset Cards (Compact Pill Grid, synced with Full Settings) -->
+              <!-- Step 2: 3-Tier Preset Cards (Compact Pill Grid, synced with Full Settings) -->
               <div class="tier-header">
                 <div class="header-title-with-tip">
-                  <span class="section-label" data-i18n="tier_title">CHỌN 1 TRONG 3 MỨC ĐỘ DỊCH</span>
-                  <sakuga-tooltip text="Chọn 1 thẻ để tự cấu hình Phạm vi &amp; AI trong Cài đặt đầy đủ (giữ nguyên Slot đã chọn)." label="Giải thích 3 mức độ">?</sakuga-tooltip>
+                  <span class="step-num">2</span>
+                  <span class="section-label" data-i18n="tier_title">CHỌN MỨC ĐỘ DỊCH</span>
+                  <sakuga-tooltip text="Chọn 1 thẻ để tự cấu hình Phạm vi &amp; AI (giữ nguyên Slot đã chọn và tự lưu cho game này)." label="Giải thích 3 mức độ">?</sakuga-tooltip>
                   <span class="tier-model-chip" title="Model AI Local đang chạy">🤖 <span id="activeModelShortLabel">AI Local</span></span>
                 </div>
                 <span id="activePresetBadge" class="badge">CẤP 2 • CÂN BẰNG</span>
@@ -318,7 +326,7 @@
                     <span class="preset-eta-pill" id="estTimeFAST">⏱ ~--</span>
                   </div>
                   <h3 data-i18n="tier_fast_name">Siêu Tốc</h3>
-                  <p data-i18n="tier_fast_desc">Flash không suy luận, tối ưu tốc độ.</p>
+                  <p data-i18n="tier_fast_desc">Dịch nhanh nhất, hợp game ít thoại hoặc test thử.</p>
                 </div>
 
                 <div class="preset-card active" id="presetCardBALANCED" data-preset="BALANCED" tabindex="0">
@@ -327,7 +335,7 @@
                     <span class="preset-eta-pill" id="estTimeBALANCED">⏱ ~--</span>
                   </div>
                   <h3 data-i18n="tier_bal_name">Cân Bằng</h3>
-                  <p data-i18n="tier_bal_desc">Chốt từ điển 1 lần + văn phong chuẩn.</p>
+                  <p data-i18n="tier_bal_desc">Khuyên dùng • Lập từ điển + giữ nguyên tên nhân vật.</p>
                 </div>
 
                 <div class="preset-card" id="presetCardDEEP_STORY" data-preset="DEEP_STORY" tabindex="0">
@@ -336,8 +344,22 @@
                     <span class="preset-eta-pill" id="estTimeDEEP_STORY">⏱ ~--</span>
                   </div>
                   <h3 data-i18n="tier_deep_name">Cốt Truyện Sâu</h3>
-                  <p data-i18n="tier_deep_desc">Deep-Think từng cụm thoại &amp; lựa chọn.</p>
+                  <p data-i18n="tier_deep_desc">AI suy luận sâu cho hội thoại, giữ đúng xưng hô.</p>
                 </div>
+              </div>
+
+              <!-- Friendly Quick Protection Toggles (Synced 1-to-1 with Full Settings) -->
+              <div class="quick-guard-strip">
+                <button type="button" id="btnQuickGuardNames" class="guard-chip active" aria-pressed="true" title="Tự khóa tên nhân vật &amp; người nói để AI không dịch nhầm tên riêng">
+                  <span class="guard-ico">🛡</span>
+                  <span data-i18n="guard_names_lbl">Giữ tên nhân vật</span>
+                  <strong id="lblQuickGuardNamesState" class="guard-state">Bật</strong>
+                </button>
+                <button type="button" id="btnQuickGuardFonts" class="guard-chip active" aria-pressed="true" title="Tự thay font fallback Unicode để Tiếng Việt không bị ô vuông hoặc lệch dấu">
+                  <span class="guard-ico">🔤</span>
+                  <span data-i18n="guard_fonts_lbl">Vá Font Tiếng Việt</span>
+                  <strong id="lblQuickGuardFontsState" class="guard-state">Bật</strong>
+                </button>
               </div>
 
               <!-- Dual-Model Speed & Quality Control Card -->
@@ -437,7 +459,14 @@
                 <button id="btnViewAllLive" class="link-btn" data-i18n="btn_view_all_live">Xem tất cả &amp; Sửa tay ➔</button>
               </div>
               <div id="miniLivePreview" class="mini-live-preview">
-                <div class="empty-state" data-i18n-html="live_empty">Bấm <strong>⚡ DỊCH NGAY</strong> ở thanh trên để bắt đầu dịch bằng AI Local.</div>
+                <div class="empty-state quickstart-guide" data-i18n-html="live_empty">
+                  <div class="qs-title">🚀 Bắt đầu dịch game trong 3 bước:</div>
+                  <div class="qs-steps">
+                    <span><strong>1.</strong> Chọn <b>Ngôn ngữ gốc ➔ Tiếng Việt</b> ở bên trái (tự nhớ lần sau)</span>
+                    <span><strong>2.</strong> Chọn mức độ dịch (mặc định <b>Cân Bằng ★</b>)</span>
+                    <span><strong>3.</strong> Bấm <strong>⚡ DỊCH NGAY</strong> ở thanh trên cùng</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -578,8 +607,7 @@
                   <button class="seg-btn" data-scope="UI_ONLY" data-i18n="scope_ui">Chỉ Giao diện UI</button>
                 </div>
                 <div id="subOptionsDrawer" class="sub-options hidden">
-                  <sakuga-checkbox id="chkTranslateChoices" checked data-i18n="chk_choices">Dịch lựa chọn (Choices)</sakuga-checkbox>
-                  <sakuga-checkbox id="chkKeepProperNouns" checked data-i18n="chk_proper_nouns">Giữ tên Item/Skill/Map nguồn trong Sub</sakuga-checkbox>
+                  <sakuga-checkbox id="chkTranslateChoices" checked data-i18n="chk_choices">Dịch lựa chọn hội thoại (Choices)</sakuga-checkbox>
                 </div>
               </div>
 
@@ -601,6 +629,14 @@
               </div>
 
               <div class="settings-divider"></div>
+
+              <div class="settings-row">
+                <div>
+                  <strong data-i18n="set_names_title">🛡 Chống dịch tên nhân vật (Bảo vệ tên riêng)</strong>
+                  <div class="mono-mini" data-i18n="set_names_desc">Tự khóa tên nhân vật, tiền tố người nói (VD: Gaspard:) và từ điển tên riêng để AI không dịch nhầm</div>
+                </div>
+                <sakuga-toggle id="chkKeepProperNouns" label="Chống dịch tên nhân vật" checked></sakuga-toggle>
+              </div>
 
               <div class="settings-row">
                 <div>

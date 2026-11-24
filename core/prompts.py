@@ -184,23 +184,25 @@ Phân tích tối đa 35 câu mẫu từ game ({source_lang_name} -> {target_lan
 Yêu cầu bắt buộc:
 1. Trích xuất tối đa 25 tên riêng nhân vật, địa danh, vật phẩm đặc trưng theo định dạng:
 TERM|SOURCE_TEXT|TARGET_TEXT|NOTE
+- QUAN TRỌNG: Với mọi TÊN NHÂN VẬT / TÊN NGƯỜI / NPC / SPEAKER, TARGET_TEXT BẮT BUỘC GIỮ NGUYÊN 100% Y HỆT SOURCE_TEXT (TUYỆT ĐỐI KHÔNG dịch nghĩa, KHÔNG phiên âm tiếng Việt — VD: TERM|Arthur Lafleur|Arthur Lafleur|Tên nhân vật — giữ nguyên).
 2. Nén bối cảnh & giọng văn thành ĐÚNG 4 DÒNG ngắn gọn (tổng dưới 100 tokens) nằm trong thẻ sau:
 STYLE_START
 Bối cảnh: <tóm tắt thể loại & thế giới game trong 1 câu ngắn>
 Giọng điệu: <phong cách dịch bám sát Bộ Văn Phong & mô tả>
 Xưng hô mặc định: <cặp ngôi xưng chính>
-Lưu ý thuật ngữ: <quy tắc giữ/dịch tên riêng & từ lóng>
+Lưu ý thuật ngữ: <quy tắc giữ nguyên 100% tên nhân vật & dịch tự nhiên vật phẩm/hội thoại>
 STYLE_END
 3. Không giải thích lan man ngoài 2 phần trên."""
 
 UI_HUD_PROMPT = """{skill_prefix}{style_card_prefix}You are a Senior Game Localization Engineer translating short game UI/HUD labels from {source_lang_name} into {target_lang_name}.
 {extra_rules}
+{proper_noun_rule}
 {glossary_block}
 
 STRICT OUTPUT PROTOCOL:
 1. Input lines follow `ID|Text`. Output MUST match every `ID|TranslatedText` line 1-to-1 (NEVER shift, merge, or skip IDs).
 2. PRESERVE EVERY `__TAG_0__`, `__NUM_0__`, ..., and `__NL__` token verbatim in natural positions. NEVER rename, drop, fuse `__NL__`, or invent `__`.
-3. Keep UI concise; no markdown, quotes added, or explanations."""
+3. NEVER translate character/person names or speaker labels. Keep UI concise; no markdown, quotes added, or explanations."""
 
 STORY_PROMPT = """{skill_prefix}{style_card_prefix}You are a Literary Game Translator translating narrative and dialogue from {source_lang_name} into {target_lang_name}.
 {extra_rules}
@@ -273,6 +275,7 @@ DEEP_THINK_GUIDE = """
 
 DEEP-THINK REASONING PROTOCOL (keep internal <think> concise, under 120 words):
 - Read all lines in this batch as one coherent scene to lock speaker relationships and consistent pronouns.
+- NEVER translate, localize, or phoneticize character/person names or speaker labels.
 - Adapt idioms, humor, cultural nuance, and emotional subtext naturally instead of translating word-for-word.
 - Verify every __TAG_x__, __NUM_x__, and __NL__ before outputting ONLY clean `ID|TranslatedText` lines."""
 
@@ -323,11 +326,12 @@ def build_translation_system_prompt(
 
     if keep_proper_nouns:
         proper_noun_rule = (
-            f"Keep only unique character/person names and branded proper nouns from {get_lang_display_name(source_lang)} "
-            "(ALWAYS translate generic items, tools, furniture, containers, and common descriptions into target language)."
+            f"CHARACTER NAME PROTECTION (STRICT): NEVER translate, localize, or phoneticize any character/person names, surnames, nicknames, or speaker prefixes from {get_lang_display_name(source_lang)} "
+            "(even when a name looks like an ordinary word, e.g. Pierre, Claire, Rose, Grace, Hope, Noël, Moreau, Blackwood, Arthur Lafleur — keep exact original spelling). "
+            "ALWAYS translate generic items, tools, furniture, containers, actions, and common descriptions into target language."
         )
     else:
-        proper_noun_rule = "Translate descriptive item or place names naturally where appropriate."
+        proper_noun_rule = "Keep personal character names intact; translate descriptive item or place names naturally where appropriate."
 
     src_name = get_lang_display_name(source_lang)
     tgt_name = get_lang_display_name(target_lang)
@@ -339,6 +343,7 @@ def build_translation_system_prompt(
             source_lang_name=src_name,
             target_lang_name=tgt_name,
             extra_rules=extra_rules,
+            proper_noun_rule=proper_noun_rule,
             glossary_block=glossary_block,
         )
     if mode == "SUB_ONLY":

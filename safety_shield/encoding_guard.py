@@ -204,6 +204,123 @@ _WORD_VI_RE = re.compile(rf"[{_UPPER_VI_LETTERS}{_LOWER_VI_LETTERS}]+")
 
 _GENDER_TAG_FLAT_RE = re.compile(r"\[g:([^\|\]]*)\|([^\]]*)\]")
 
+# Character-name key detection & speaker-prefix protection
+_CHAR_NAME_KEY_POS_RE = re.compile(
+    r"(?:^|[._/\-])(?:CHAR(?:ACTER)?_?NAME|SPEAKER(?:_?NAME)?|NPC_?NAME|ACTOR_?NAME|HERO_?NAME|"
+    r"FIRST_?NAME|LAST_?NAME|SURNAME|FULL_?NAME|PERSON_?NAME|CONTACT_?NAME|PORTRAIT_?NAME|CHARACTERS?)(?:$|[._/\-\d])",
+    re.IGNORECASE,
+)
+_CHAR_NAME_KEY_NEG_RE = re.compile(
+    r"(?:PROMPT|ENTER|INPUT|PLACEHOLDER|DESC|DESCRIPTION|BIO|STORY|DIALOG|DIALOGUE|SUB|LINE|TITLE|JOB|ROLE|CLASS|LABEL|HINT|TOOLTIP|ERROR|MSG)",
+    re.IGNORECASE,
+)
+_GENERIC_NON_NAME_WORDS = frozenset(
+    {
+        "play", "start", "continue", "back", "cancel", "ok", "yes", "no", "save", "load", "quit", "exit",
+        "settings", "options", "menu", "name", "player", "character", "hero", "enemy", "boss", "npc",
+        "unknown", "anonymous", "none", "empty", "default", "guest", "user", "admin", "system", "narrator",
+        "stranger", "citizen", "guard", "merchant", "doctor", "captain", "officer", "soldier", "villager",
+        "new", "old", "all", "auto", "manual", "custom", "random", "classic", "normal", "hard", "easy",
+        "nom", "joueur", "inconnu", "anonyme", "aucun", "vide", "héros", "ennemi", "citoyen", "garde",
+        "marchand", "docteur", "capitaine", "narrateur", "étranger", "système", "nouveau", "tous",
+        "note", "tip", "hint", "info", "warning", "alert", "error", "quest", "mission", "objective",
+        "task", "chapter", "act", "day", "level", "stage", "phase", "status", "effect", "reward",
+        "cost", "price", "type", "class", "rank", "bonus", "penalty", "target", "location", "time",
+        "date", "source", "author", "from", "to", "subject", "control", "controls", "key", "option",
+        "setting", "requirement", "goal", "result", "score", "total", "count", "amount", "value",
+        "damage", "health", "energy", "speed", "power", "defense", "attack", "skill", "item", "weapon",
+        "armor", "inventory", "summary", "details", "description", "category", "language", "version",
+        "remarque", "conseil", "astuce", "attention", "alerte", "erreur", "quête", "objectif",
+        "chapitre", "jour", "niveau", "statut", "effet", "récompense", "coût", "prix", "lieu",
+        "cible", "temps", "de", "à", "objet", "résultat", "dégâts", "santé", "énergie", "arme",
+        "armure", "inventaire", "catégorie", "langue", "hinweis", "warnung", "fehler", "kapitel",
+        "tag", "stufe", "ziel", "ort", "nota", "consejo", "aviso", "capítulo", "día", "nivel", "objetivo",
+    }
+)
+_HONORIFICS_RE = re.compile(r"^(?:Mr|Mrs|Ms|Miss|Dr|Pr|Prof|M|Mme|Mlle|Sgt|Lt|Capt|Col|Gen|Sir|Lady|St)\.$")
+_NAME_TOKEN_RE = re.compile(
+    r"^[A-ZÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ][a-zàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ'’-]{1,22}(?:-[A-ZÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ][a-zàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ'’-]{1,20})?$"
+)
+_SPEAKER_PREFIX_RE = re.compile(
+    r"^((?:(?:Mr|Mrs|Ms|Miss|Dr|Pr|Prof|M|Mme|Mlle|Sgt|Lt|Capt|Col|Gen|Sir|Lady|St)\.\s+)?"
+    r"[A-ZÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ][a-zàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ'’-]{1,22}"
+    r"(?:-[A-ZÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ][a-zàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ'’-]{1,20})?"
+    r"(?:\s+[A-ZÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ][a-zàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ'’-]{1,22}){0,2})"
+    r"(\s*:\s+)(.+)$",
+    re.DOTALL,
+)
+
+
+def is_standalone_character_name(key: str, text: str) -> bool:
+    """Return True when key+value clearly represent a standalone character/NPC proper name."""
+    s = (text or "").strip()
+    if not s or len(s) < 2 or len(s) > 42:
+        return False
+    if s.endswith((".", "?", "!", "…")) or any(ch in s for ch in "?!…\n\r{}<>[]|%="):
+        return False
+    if not _CHAR_NAME_KEY_POS_RE.search(key or "") or _CHAR_NAME_KEY_NEG_RE.search(key or ""):
+        return False
+    parts = s.split()
+    if not (1 <= len(parts) <= 3):
+        return False
+    meaningful = [p for p in parts if not _HONORIFICS_RE.match(p)]
+    if not meaningful:
+        return False
+    if any("." in p for p in meaningful):
+        return False
+    if all(p.lower().strip(".,") in _GENERIC_NON_NAME_WORDS for p in meaningful):
+        return False
+    return all(_NAME_TOKEN_RE.match(p) or (p.isupper() and p.isalpha() and len(p) >= 2) for p in meaningful)
+
+
+def extract_speaker_prefix(text: str) -> Tuple[str, str]:
+    """Extract a leading dialogue speaker prefix (`Name: `) if clearly a character name.
+
+    Returns `(prefix_with_colon_and_space, rest_text)` or `("", text)` if not a speaker name.
+    """
+    if not text or ":" not in text:
+        return "", text
+    m = _SPEAKER_PREFIX_RE.match(text)
+    if not m:
+        return "", text
+    raw_name, sep, rest = m.group(1), m.group(2), m.group(3)
+    if len(rest.strip()) < 2:
+        return "", text
+    tokens = [t for t in raw_name.split() if not _HONORIFICS_RE.match(t)]
+    if not tokens:
+        return "", text
+    if any(t.lower() in _GENERIC_NON_NAME_WORDS for t in tokens):
+        return "", text
+    return f"{raw_name}{sep}", rest
+
+
+def collect_protected_character_names(
+    rows: list[dict],
+    glossary_terms: Optional[list[dict]] = None,
+) -> set[str]:
+    """Collect verified character/person names from standalone keys, glossary locks, and speaker prefixes."""
+    names: set[str] = set()
+    for row in rows or []:
+        src = str(row.get("source_text") or "").strip()
+        key = str(row.get("sample_key") or "")
+        if is_standalone_character_name(key, src):
+            names.add(src)
+            for tok in src.split():
+                if len(tok) >= 3 and _NAME_TOKEN_RE.match(tok) and tok.lower() not in _GENERIC_NON_NAME_WORDS:
+                    names.add(tok)
+        pref, _rest = extract_speaker_prefix(src)
+        if pref:
+            sp_name = pref.split(":", 1)[0].strip()
+            if len(sp_name) >= 3:
+                names.add(sp_name)
+    for term in glossary_terms or []:
+        st = str(term.get("source_term") or "").strip()
+        tt = str(term.get("target_term") or "").strip()
+        if len(st) >= 3 and st == tt and st[0].isupper() and st.lower() not in _GENERIC_NON_NAME_WORDS:
+            if not any(ch in st for ch in ".?!{}<>[]"):
+                names.add(st)
+    return names
+
 
 def _flatten_gender_tags(text: str) -> str:
     return _GENDER_TAG_FLAT_RE.sub(lambda m: (m.group(1) or m.group(2) or "").strip(), text)
@@ -214,6 +331,7 @@ def detect_translation_anomaly(
     translated_text: str,
     target_lang: str = "vi",
     source_lang: str = "auto",
+    protected_names: Optional[set[str]] = None,
 ) -> Tuple[bool, str]:
     """Detect non-target language leaks, mojibake, gibberish, word repetition, or LLM bloat.
 
@@ -269,18 +387,39 @@ def detect_translation_anomaly(
             return True, "PLURAL_KEY_CORRUPT"
         if "[g:" in tr_raw:
             return True, "GENDER_TAG_LEAK"
+
+        src_raw_word_set = set(_WORD_VI_RE.findall(src_clean))
+        prot_lower = {p.lower() for p in (protected_names or set())}
+        # Allow preserved TitleCase proper names containing foreign diacritics (e.g. François, Noël, Chloé, Raphaël, Müller)
         if _FR_ONLY_DIAC_RE.search(tr_clean) and (tr_clean != src_clean or _FR_LEAK_TOKEN_RE.search(tr_clean)):
-            return True, "FR_DIACRITIC_LEAK"
+            bad_diac = False
+            for tok in re.findall(r"[A-Za-zÀ-ÿ]+", tr_clean):
+                if _FR_ONLY_DIAC_RE.search(tok):
+                    if tok[0].isupper() and (tok in src_raw_word_set or tok.lower() in prot_lower):
+                        continue
+                    bad_diac = True
+                    break
+            if bad_diac:
+                return True, "FR_DIACRITIC_LEAK"
+
         if _FR_LEAK_TOKEN_RE.search(tr_clean):
             return True, "FR_LEAK"
         src_words_lo = {w.lower() for w in _WORD_VI_RE.findall(src_clean)}
         tr_tokens = _WORD_VI_RE.findall(tr_clean)
+        src_mid_titlecase = {
+            t for i_s, t in enumerate(_WORD_VI_RE.findall(src_clean))
+            if i_s > 0 and len(t) >= 3 and t[0].isupper() and not t.isupper()
+        }
         if _VI_ACCENT_CHAR_RE.search(tr_clean):
             for idx_t, tok in enumerate(tr_tokens):
                 tl = tok.lower()
                 if len(tok) >= 5 and tl in src_words_lo and not tok.isupper() and tl not in _ALLOWED_LOANWORDS_VI:
-                    # Skip TitleCase surnames preceded by another TitleCase name (e.g. "Arthur Lafleur")
-                    if tok[0].isupper() and idx_t > 0 and tr_tokens[idx_t - 1][0].isupper():
+                    # Skip verified character names, TitleCase surnames, or mid-sentence proper nouns kept from source
+                    if tok[0].isupper() and (
+                        tl in prot_lower
+                        or tok in src_mid_titlecase
+                        or (idx_t > 0 and tr_tokens[idx_t - 1][0].isupper())
+                    ):
                         continue
                     # Skip literal filename identifiers (e.g. "communication.exe")
                     if re.search(rf"\b{re.escape(tok)}\.[A-Za-z0-9]{{2,5}}\b", tr_clean):
@@ -352,5 +491,15 @@ def detect_translation_anomaly(
                 garble_hits += 1
         if garble_hits >= 2 or (garble_hits == 1 and len(tr_clean.split()) <= 4):
             return True, "GIBBERISH"
+
+    # Guard against accidentally translating verified character/person names present verbatim in source
+    if protected_names and src_clean and tr_clean:
+        tr_low = tr_clean.lower()
+        for nm in protected_names:
+            if len(nm) < 3 or not nm[0].isupper():
+                continue
+            if re.search(rf"(?<![A-Za-zÀ-ỹ]){re.escape(nm)}(?![A-Za-zÀ-ỹ])", src_clean):
+                if nm.lower() not in tr_low:
+                    return True, f"NAME_TRANSLATED:{nm}"
 
     return False, "OK"

@@ -911,9 +911,19 @@ async function launchOllamaFromUI(btnEl = null) {
 async function loadGames(selectId = null) {
   const data = await api("/api/games");
   state.games = data.games || [];
-  if (selectId) state.selectedGameId = selectId;
+  if (selectId) {
+    state.selectedGameId = selectId;
+  } else if (!state.selectedGameId) {
+    const savedId = localStorage.getItem("sakuga_last_game_id") || "";
+    if (savedId && state.games.some((x) => x.game_id === savedId)) {
+      state.selectedGameId = savedId;
+    }
+  }
   if (!state.selectedGameId && state.games.length) {
     state.selectedGameId = state.games[0].game_id;
+  }
+  if (state.selectedGameId) {
+    localStorage.setItem("sakuga_last_game_id", state.selectedGameId);
   }
   renderSidebarGames();
   renderPosterGrid();
@@ -980,6 +990,7 @@ function renderSidebarGames() {
     row.querySelector(".sb-remove-btn").addEventListener("click", (ev) => removeGameFromLibrary(g, ev));
     row.addEventListener("click", () => {
       state.selectedGameId = g.game_id;
+      localStorage.setItem("sakuga_last_game_id", g.game_id);
       fireSakugaVfx(row, "tap");
       switchView("game");
       renderSidebarGames();
@@ -1015,6 +1026,7 @@ function renderPosterGrid() {
     card.querySelector(".poster-remove-btn").addEventListener("click", (ev) => removeGameFromLibrary(g, ev));
     card.addEventListener("click", () => {
       state.selectedGameId = g.game_id;
+      localStorage.setItem("sakuga_last_game_id", g.game_id);
       fireSakugaVfx(card, "tap");
       switchView("game");
       renderSidebarGames();
@@ -1149,7 +1161,25 @@ async function renderSelectedGamePage() {
     fetchSteamContextForGame(g.game_id, true);
   }
 
-  if (PRESET_DEFS[state.preset]) applyPresetLevel(state.preset, false);
+  // Restore per-game persisted Basic & Advanced settings cleanly across app restarts
+  const savedScope = g.scope || "FULL_PATCH";
+  const savedAiMode = g.ai_mode || "AUTO_HYBRID";
+  const savedPreset = g.preset_level || "BALANCED";
+  const savedChoices = g.translate_choices !== undefined && g.translate_choices !== null ? Boolean(Number(g.translate_choices)) : true;
+  const savedKeepNames = g.keep_proper_nouns !== undefined && g.keep_proper_nouns !== null ? Boolean(Number(g.keep_proper_nouns)) : true;
+  const savedPatchFonts = g.patch_fonts !== undefined && g.patch_fonts !== null ? Boolean(Number(g.patch_fonts)) : true;
+
+  state.scope = savedScope;
+  state.aiMode = savedAiMode;
+  state.preset = savedPreset;
+  $("chkTranslateChoices").checked = savedChoices;
+  $("chkKeepProperNouns").checked = savedKeepNames;
+  $("chkPatchFonts").checked = savedPatchFonts;
+  document.querySelectorAll("#scopeSegmented .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.scope === savedScope));
+  $("subOptionsDrawer").classList.toggle("hidden", savedScope !== "SUB_ONLY");
+  document.querySelectorAll("#aiModeSegmented .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.aimode === savedAiMode));
+  syncQuickGuardPills();
+  markCustomPresetIfModified(false);
   updateStartButtonState();
   await refreshStudioMonitor(g.game_id);
 }
@@ -1380,6 +1410,7 @@ function renderSlotGrids() {
         const g = selectedGame();
         if (g) {
           g.inject_slot = s.slot_id;
+          flashConfigSaved();
           api(`/api/games/${g.game_id}/profile`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
@@ -1392,9 +1423,74 @@ function renderSlotGrids() {
   }
 }
 
-// ---------------- 3 Presets & Slider Sync ---------------- //
+// ---------------- 3 Presets, Quick Guards & Per-Game Persistence ---------------- //
 
-function applyPresetLevel(levelKey, triggerVfx = true) {
+let _cfgSavedTimer = null;
+function flashConfigSaved() {
+  const el = $("cfgSavedPill");
+  if (!el) return;
+  const isEn = state.uiLang === "en";
+  el.textContent = isEn ? "✓ Saved" : "✓ Đã lưu";
+  el.classList.add("pulse");
+  if (_cfgSavedTimer) clearTimeout(_cfgSavedTimer);
+  _cfgSavedTimer = setTimeout(() => {
+    el.classList.remove("pulse");
+    el.textContent = isEn ? "✓ Auto-saved" : "✓ Tự nhớ";
+  }, 1500);
+}
+
+function syncQuickGuardPills() {
+  const isEn = state.uiLang === "en";
+  const onTxt = isEn ? "ON" : "Bật";
+  const offTxt = isEn ? "OFF" : "Tắt";
+  const namesOn = Boolean($("chkKeepProperNouns")?.checked);
+  const fontsOn = Boolean($("chkPatchFonts")?.checked);
+
+  const btnN = $("btnQuickGuardNames");
+  if (btnN) {
+    btnN.classList.toggle("active", namesOn);
+    btnN.setAttribute("aria-pressed", namesOn ? "true" : "false");
+  }
+  if ($("lblQuickGuardNamesState")) $("lblQuickGuardNamesState").textContent = namesOn ? onTxt : offTxt;
+
+  const btnF = $("btnQuickGuardFonts");
+  if (btnF) {
+    btnF.classList.toggle("active", fontsOn);
+    btnF.setAttribute("aria-pressed", fontsOn ? "true" : "false");
+  }
+  if ($("lblQuickGuardFontsState")) $("lblQuickGuardFontsState").textContent = fontsOn ? onTxt : offTxt;
+}
+
+function persistGameBasicConfig(extraPatch = {}) {
+  const g = selectedGame();
+  if (!g) return;
+  const payload = {
+    source_lang: state.sourceLang,
+    target_lang: state.targetLang,
+    inject_slot: state.injectSlot,
+    scope: state.scope,
+    preset_level: state.preset,
+    ai_mode: state.aiMode,
+    translate_choices: Boolean($("chkTranslateChoices")?.checked),
+    keep_proper_nouns: Boolean($("chkKeepProperNouns")?.checked),
+    patch_fonts: Boolean($("chkPatchFonts")?.checked),
+    ...extraPatch,
+  };
+  Object.assign(g, {
+    ...payload,
+    translate_choices: payload.translate_choices ? 1 : 0,
+    keep_proper_nouns: payload.keep_proper_nouns ? 1 : 0,
+    patch_fonts: payload.patch_fonts ? 1 : 0,
+  });
+  flashConfigSaved();
+  api(`/api/games/${g.game_id}/profile`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+}
+
+function applyPresetLevel(levelKey, triggerVfx = true, persist = false) {
   const def = PRESET_DEFS[levelKey];
   if (!def) return;
   state.preset = levelKey;
@@ -1409,8 +1505,7 @@ function applyPresetLevel(levelKey, triggerVfx = true) {
   document.querySelectorAll("#aiModeSegmented .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.aimode === def.aiMode));
 
   $("chkTranslateChoices").checked = def.translateChoices;
-  $("chkKeepProperNouns").checked = def.keepProperNouns;
-  $("chkPatchFonts").checked = def.patchFonts;
+  syncQuickGuardPills();
 
   // Preserve user's explicitly selected injectSlot if it's valid; only auto-pick if unset/invalid
   if (state.rankedSlots.length) {
@@ -1433,6 +1528,7 @@ function applyPresetLevel(levelKey, triggerVfx = true) {
       $("teleEtaMini").textContent = est.est_label;
     }
   }
+  if (persist) persistGameBasicConfig();
   if (triggerVfx) fireSakugaVfx($(`presetCard${levelKey}`), "preset");
 }
 
@@ -1457,18 +1553,18 @@ function renderPresetEstimates(estimates) {
   }
 }
 
-function markCustomPresetIfModified() {
+function markCustomPresetIfModified(persist = true) {
+  syncQuickGuardPills();
   const choices = Boolean($("chkTranslateChoices")?.checked);
-  const keepNouns = Boolean($("chkKeepProperNouns")?.checked);
-  const patchFonts = Boolean($("chkPatchFonts")?.checked);
 
-  // Check if current settings match one of the 3 presets so Overview & Full Settings stay unified
+  // Check if current (scope, aiMode, choices) matches one of the 3 presets so Overview & Full Settings stay unified
   for (const [key, def] of Object.entries(PRESET_DEFS)) {
-    const subMatch = def.scope !== "SUB_ONLY" || (choices === def.translateChoices && keepNouns === def.keepProperNouns);
-    if (state.scope === def.scope && state.aiMode === def.aiMode && patchFonts === def.patchFonts && subMatch) {
+    const subMatch = def.scope !== "SUB_ONLY" || choices === def.translateChoices;
+    if (state.scope === def.scope && state.aiMode === def.aiMode && subMatch) {
       state.preset = key;
       document.querySelectorAll(".preset-card").forEach((c) => c.classList.toggle("active", c.dataset.preset === key));
       setSyncedPresetBadge(typeof window.tUI === "function" ? window.tUI(`preset_badge_${key}`) : def.badge);
+      if (persist) persistGameBasicConfig();
       return;
     }
   }
@@ -1484,6 +1580,7 @@ function markCustomPresetIfModified() {
   const aiShort = state.aiMode === "FLASH" ? "Flash" : state.aiMode === "DEEP_THINK" ? "Deep-Think" : "Auto-Hybrid";
   const prefix = isEn ? "CUSTOM" : "TÙY CHỈNH";
   setSyncedPresetBadge(`${prefix} • ${scopeShort} • ${aiShort}`);
+  if (persist) persistGameBasicConfig();
 }
 
 // ---------------- Monitor & Inline Editor ---------------- //
@@ -1965,17 +2062,31 @@ async function handleStartOrPause() {
   await runTranslationWithPreset(null);
 }
 
-async function rerankSlots() {
+async function rerankSlots(persist = false) {
   const g = selectedGame();
   if (!g) return;
   const data = await api(`/api/games/${g.game_id}/slots`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source_lang: state.sourceLang, target_lang: state.targetLang }),
+    body: JSON.stringify({
+      source_lang: state.sourceLang,
+      target_lang: state.targetLang,
+      current_inject_slot: state.injectSlot,
+      persist: Boolean(persist),
+    }),
   });
   state.rankedSlots = data.ranked_slots || [];
-  if (state.rankedSlots.length) state.injectSlot = state.rankedSlots[0].slot_id;
+  if (data.inject_slot) {
+    state.injectSlot = data.inject_slot;
+  } else if (state.rankedSlots.length) {
+    state.injectSlot = state.rankedSlots[0].slot_id;
+  }
+  g.source_lang = state.sourceLang;
+  g.target_lang = state.targetLang;
+  g.inject_slot = state.injectSlot;
+  g.ranked_slots = state.rankedSlots;
   renderSlotGrids();
+  if (persist) flashConfigSaved();
 }
 
 async function scanSelectedGame() {
@@ -3043,8 +3154,23 @@ function bindEvents() {
   });
 
   document.querySelectorAll(".preset-card").forEach((c) => {
-    c.addEventListener("click", () => applyPresetLevel(c.dataset.preset, true));
+    c.addEventListener("click", () => applyPresetLevel(c.dataset.preset, true, true));
     c.addEventListener("dblclick", () => runTranslationWithPreset(c.dataset.preset));
+  });
+
+  $("btnQuickGuardNames")?.addEventListener("click", () => {
+    const chk = $("chkKeepProperNouns");
+    if (!chk) return;
+    chk.checked = !chk.checked;
+    syncQuickGuardPills();
+    persistGameBasicConfig();
+  });
+  $("btnQuickGuardFonts")?.addEventListener("click", () => {
+    const chk = $("chkPatchFonts");
+    if (!chk) return;
+    chk.checked = !chk.checked;
+    syncQuickGuardPills();
+    persistGameBasicConfig();
   });
 
   $("btnRescanGame").addEventListener("click", scanSelectedGame);
@@ -3061,13 +3187,8 @@ function bindEvents() {
     if (g) {
       g.source_lang = val;
       renderGameContextCard(g);
-      api(`/api/games/${g.game_id}/profile`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source_lang: val }),
-      }).catch(() => {});
     }
-    rerankSlots();
+    rerankSlots(true);
   };
   const handleTargetLangChange = (val) => {
     state.targetLang = val;
@@ -3078,13 +3199,8 @@ function bindEvents() {
     if (g) {
       g.target_lang = val;
       renderGameContextCard(g);
-      api(`/api/games/${g.game_id}/profile`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target_lang: val }),
-      }).catch(() => {});
     }
-    rerankSlots();
+    rerankSlots(true);
   };
   $("selectSourceLang").addEventListener("change", (e) => handleSourceLangChange(e.target.value));
   $("selectSourceLangSettings")?.addEventListener("change", (e) => handleSourceLangChange(e.target.value));
@@ -3097,7 +3213,7 @@ function bindEvents() {
       b.classList.add("active");
       state.scope = b.dataset.scope;
       $("subOptionsDrawer").classList.toggle("hidden", state.scope !== "SUB_ONLY");
-      markCustomPresetIfModified();
+      markCustomPresetIfModified(true);
     });
   });
   document.querySelectorAll("#aiModeSegmented .seg-btn").forEach((b) => {
@@ -3105,13 +3221,19 @@ function bindEvents() {
       document.querySelectorAll("#aiModeSegmented .seg-btn").forEach((x) => x.classList.remove("active"));
       b.classList.add("active");
       state.aiMode = b.dataset.aimode;
-      markCustomPresetIfModified();
+      markCustomPresetIfModified(true);
     });
   });
 
-  $("chkTranslateChoices").addEventListener("change", markCustomPresetIfModified);
-  $("chkKeepProperNouns").addEventListener("change", markCustomPresetIfModified);
-  $("chkPatchFonts").addEventListener("change", markCustomPresetIfModified);
+  $("chkTranslateChoices").addEventListener("change", () => markCustomPresetIfModified(true));
+  $("chkKeepProperNouns").addEventListener("change", () => {
+    syncQuickGuardPills();
+    persistGameBasicConfig();
+  });
+  $("chkPatchFonts").addEventListener("change", () => {
+    syncQuickGuardPills();
+    persistGameBasicConfig();
+  });
   $("chkOfflineOverride").addEventListener("change", updateStartButtonState);
   $("btnOpenBackupFolder").addEventListener("click", async (e) => {
     e.preventDefault();

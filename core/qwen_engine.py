@@ -24,7 +24,10 @@ from core.prompts import (
     build_translation_system_prompt,
 )
 from safety_shield.encoding_guard import (
+    collect_protected_character_names,
     detect_translation_anomaly,
+    extract_speaker_prefix,
+    is_standalone_character_name,
     smart_word_wrap,
     strip_thinking,
     try_fix_mojibake,
@@ -823,6 +826,7 @@ class QwenEngine:
         model_name: Optional[str] = None,
         num_ctx: Optional[int] = None,
         batch_stream_cb: Optional[Callable[[int, float], None]] = None,
+        protected_names: Optional[set[str]] = None,
     ) -> Tuple[int, float]:
         await pause_event.wait()
 
@@ -836,6 +840,14 @@ class QwenEngine:
             target_lang,
             limit=16,
         )
+        eff_protected: set[str] = set(protected_names or set())
+        if keep_proper_nouns:
+            for t in rag_terms:
+                st = str(t.get("source_term") or "").strip()
+                tt = str(t.get("target_term") or "").strip()
+                if len(st) >= 3 and st == tt and st[0].isupper():
+                    eff_protected.add(st)
+
         sys_prompt = build_translation_system_prompt(
             mode=mode,
             source_lang=source_lang,
@@ -850,9 +862,26 @@ class QwenEngine:
             deep_think=use_think,
         )
 
-        # Build ID|Text payload
+        # Build ID|Text payload, dynamically masking verified dialogue speaker prefixes (`Name: `) when keep_proper_nouns=True
         id_to_row = {str(idx): row for idx, row in enumerate(batch_rows)}
-        user_prompt = "\n".join(f"{idx}|{row['masked_text']}" for idx, row in enumerate(batch_rows))
+        id_to_masked: Dict[str, str] = {}
+        id_to_tagmap: Dict[str, Dict[str, str]] = {}
+        for idx, row in enumerate(batch_rows):
+            rid = str(idx)
+            m_txt = row["masked_text"]
+            t_map = dict(row.get("tag_map") or {})
+            if keep_proper_nouns:
+                sp_pref, sp_rest = extract_speaker_prefix(m_txt)
+                if sp_pref:
+                    sp_tok = f"__TAG_{900 + len(t_map)}__"
+                    while sp_tok in m_txt or sp_tok in t_map:
+                        sp_tok = f"__TAG_{900 + len(t_map) + 1}__"
+                    t_map[sp_tok] = sp_pref
+                    m_txt = f"{sp_tok}{sp_rest}"
+            id_to_masked[rid] = m_txt
+            id_to_tagmap[rid] = t_map
+
+        user_prompt = "\n".join(f"{idx}|{id_to_masked[str(idx)]}" for idx in range(len(batch_rows)))
 
         total_tokens = 0
         total_elapsed = 0.0
@@ -936,12 +965,14 @@ class QwenEngine:
                 logger.warning("Batch alignment drift detected (size=%d); splitting to micro-chunks.", len(id_to_row))
                 parsed = {}
 
-            def _validate_candidate(row: Dict[str, Any], raw_tr: str) -> Tuple[bool, str]:
+            def _validate_candidate(rid_key: str, row: Dict[str, Any], raw_tr: str) -> Tuple[bool, str]:
                 nmap = row.get("num_map") or {}
+                eff_m = id_to_masked.get(rid_key, row["masked_text"])
+                eff_tm = id_to_tagmap.get(rid_key, row["tag_map"])
                 ok, unmasked, _reason = validate_and_unmask(
-                    row["masked_text"],
+                    eff_m,
                     raw_tr,
-                    row["tag_map"],
+                    eff_tm,
                     row["source_text"],
                     num_map=nmap,
                     keep_num_tokens=True,
@@ -953,7 +984,13 @@ class QwenEngine:
                     unmasked = fixed_moji
                 unfolded_src = unfold_numbers(row["source_text"], nmap) if nmap else row["source_text"]
                 unfolded_out = unfold_numbers(unmasked, nmap) if nmap else unmasked
-                bad_q, _q_reason = detect_translation_anomaly(unfolded_src, unfolded_out, target_lang, source_lang=source_lang)
+                bad_q, _q_reason = detect_translation_anomaly(
+                    unfolded_src,
+                    unfolded_out,
+                    target_lang,
+                    source_lang=source_lang,
+                    protected_names=eff_protected if keep_proper_nouns else None,
+                )
                 if bad_q:
                     return False, row["source_text"]
                 return True, smart_word_wrap(unmasked, 0)
@@ -979,7 +1016,7 @@ class QwenEngine:
             retry_ids: List[str] = []
 
             for idx_str, row in id_to_row.items():
-                ok, cleaned = _validate_candidate(row, parsed.get(idx_str, ""))
+                ok, cleaned = _validate_candidate(idx_str, row, parsed.get(idx_str, ""))
                 if ok:
                     _record_valid(row, cleaned, "OK")
                 else:
@@ -994,12 +1031,19 @@ class QwenEngine:
                 for c_start in range(0, len(retry_ids), chunk_sz):
                     await pause_event.wait()
                     sub_ids = retry_ids[c_start : c_start + chunk_sz]
-                    retry_prompt = "\n".join(f"{rid}|{id_to_row[rid]['masked_text']}" for rid in sub_ids)
+                    retry_prompt = "\n".join(f"{rid}|{id_to_masked[rid]}" for rid in sub_ids)
+                    locked_hint = ""
+                    if keep_proper_nouns and eff_protected:
+                        joined_sub = " ".join(id_to_row[rid]["source_text"] for rid in sub_ids)
+                        hits = [nm for nm in sorted(eff_protected) if nm in joined_sub][:8]
+                        if hits:
+                            locked_hint = f" KEEP THESE CHARACTER NAMES VERBATIM (DO NOT TRANSLATE): {', '.join(hits)}."
                     try:
                         r_content, _r_think, r_tok, r_elap = await self._call_ollama_chat(
                             client,
                             sys_prompt
-                            + "\nCRITICAL: Output ONLY 100% clean target-language translations matching input IDs verbatim; translate EVERY common word (including capitalized leading item/role nouns, never copy French/German words or switch to English), preserve all __TAG_x__, __NUM_x__, and __NL__, no foreign characters, no glued words, no repetition!",
+                            + "\nCRITICAL: Output ONLY 100% clean target-language translations matching input IDs verbatim; translate EVERY common word (EXCEPT character/person names — NEVER translate character names!), preserve all __TAG_x__, __NUM_x__, and __NL__, no foreign characters, no glued words, no repetition!"
+                            + locked_hint,
                             retry_prompt,
                             think=False,
                             temperature=0.0,
@@ -1026,7 +1070,7 @@ class QwenEngine:
 
                     for rid in sub_ids:
                         row = id_to_row[rid]
-                        ok, cleaned = _validate_candidate(row, r_parsed.get(rid, ""))
+                        ok, cleaned = _validate_candidate(rid, row, r_parsed.get(rid, ""))
                         if ok:
                             _record_valid(row, cleaned, "TAG FIXED")
                         else:
@@ -1123,6 +1167,38 @@ class QwenEngine:
             prog = cache_db.get_progress(source_lang, target_lang)
             return {"ok": True, "tm_hits": 0, "llm_translated": 0, "progress": prog}
 
+        # Step 0: Auto-lock standalone character/NPC proper-name entries (0ms, zero risk of translating character names)
+        name_lock_updates: List[Tuple[str, str, str]] = []
+        name_lock_rows: List[Dict[str, Any]] = []
+        after_name_lock: List[Dict[str, Any]] = []
+        if keep_proper_nouns:
+            for row in pending:
+                if not row.get("num_map") and is_standalone_character_name(row.get("sample_key") or "", row.get("source_text") or ""):
+                    name_lock_updates.append((row["str_hash"], row["source_text"], "NAME LOCK"))
+                    name_lock_rows.append(
+                        {
+                            "key": row.get("sample_key") or row["str_hash"][:8],
+                            "source": row["source_text"],
+                            "translated": row["source_text"],
+                            "badge": "NAME LOCK",
+                        }
+                    )
+                else:
+                    after_name_lock.append(row)
+            if name_lock_updates:
+                cache_db.mark_translated_batch(name_lock_updates)
+                if emit_cb:
+                    emit_cb("live_rows", {"rows": name_lock_rows[:60]})
+        else:
+            after_name_lock = list(pending)
+
+        # Collect verified character names (from standalone keys, speaker prefixes & glossary)
+        protected_names: set[str] = (
+            collect_protected_character_names(pending, cache_db.list_glossary_terms(source_lang, target_lang))
+            if keep_proper_nouns
+            else set()
+        )
+
         # Step A: Global TM 0ms lookup (bypassed on explicit Re-apply Skill; skip template rows with __NUM_x__)
         tm_updates: List[Tuple[str, str, str]] = []
         tm_live_rows: List[Dict[str, Any]] = []
@@ -1130,14 +1206,24 @@ class QwenEngine:
         tm_chars = 0
 
         if not bypass_global_tm:
-            lookup_texts = [r["source_text"] for r in pending if not r.get("num_map")]
+            lookup_texts = [r["source_text"] for r in after_name_lock if not r.get("num_map")]
             tm_map = global_tm.lookup_exact_batch(lookup_texts, source_lang, target_lang) if lookup_texts else {}
-            for row in pending:
+            for row in after_name_lock:
                 if row.get("num_map"):
                     remaining.append(row)
                     continue
                 hit = tm_map.get(row["source_text"])
-                hit_bad = detect_translation_anomaly(row["source_text"], hit, target_lang, source_lang=source_lang)[0] if hit else False
+                hit_bad = (
+                    detect_translation_anomaly(
+                        row["source_text"],
+                        hit,
+                        target_lang,
+                        source_lang=source_lang,
+                        protected_names=protected_names if keep_proper_nouns else None,
+                    )[0]
+                    if hit
+                    else False
+                )
                 if hit and not hit_bad:
                     tm_updates.append((row["str_hash"], hit, "TM 0ms"))
                     tm_chars += max(8, len(row["masked_text"]))
@@ -1152,7 +1238,7 @@ class QwenEngine:
                 else:
                     remaining.append(row)
         else:
-            remaining = list(pending)
+            remaining = list(after_name_lock)
 
         if tm_updates:
             cache_db.mark_translated_batch(tm_updates)
@@ -1285,6 +1371,10 @@ class QwenEngine:
                                 "tok_per_sec": 0.0,
                             },
                         )
+                if keep_proper_nouns:
+                    protected_names.update(
+                        collect_protected_character_names([], cache_db.list_glossary_terms(source_lang, target_lang))
+                    )
 
             # Step C: Length Bucketing (Short UI / <=6 words vs Story/Dialogue) -> KV Prefix Cache optimization
             def _is_short_ui(row: Dict[str, Any]) -> bool:
@@ -1425,6 +1515,7 @@ class QwenEngine:
                         model_name=use_model,
                         num_ctx=ctx_sz,
                         batch_stream_cb=_on_batch_stream if is_deep_batch else None,
+                        protected_names=protected_names,
                     )
                 finally:
                     in_flight_tokens.pop(my_bid, None)
@@ -1629,10 +1720,19 @@ class QwenEngine:
             "`ID|EXACT_ENGLISH_TEXT|Polished_Vietnamese`\n"
             "Example: `3|HOST|TẠO PHÒNG`\n"
             "- NEVER include `[EN]`, `[VI]`, `=>`, `->`, or `||`.\n"
+            "- NEVER translate, alter, or phoneticize character/person names or speaker labels (e.g. Pierre, Claire, Arthur Lafleur, Dr. Moreau).\n"
             "- Preserve every __TAG_x__, __NUM_x__, and __NL__ verbatim. If all lines are good, output `NONE`."
         )
 
         from rapidfuzz import fuzz
+
+        qa_protected = collect_protected_character_names(done_rows, cache_db.list_glossary_terms(source_lang, target_lang))
+        done_rows = [
+            r for r in done_rows
+            if r.get("badge") != "NAME LOCK" and not is_standalone_character_name(r.get("sample_key") or "", r.get("source_text") or "")
+        ]
+        if not done_rows:
+            return {"reviewed": 0, "polished": 0, "samples": []}
 
         qa_batch_size = 10
         batches = [done_rows[i : i + qa_batch_size] for i in range(0, len(done_rows), qa_batch_size)]
@@ -1740,7 +1840,13 @@ class QwenEngine:
                             continue
                         if re.match(r"^[A-Z]\s+[a-zà-ỹ]", unfolded_out.strip()) and not re.match(r"^[A-Z]\s+", unfolded_src.strip()):
                             continue
-                        bad_q, _ = detect_translation_anomaly(unfolded_src, unfolded_out, target_lang, source_lang=source_lang)
+                        bad_q, _ = detect_translation_anomaly(
+                            unfolded_src,
+                            unfolded_out,
+                            target_lang,
+                            source_lang=source_lang,
+                            protected_names=qa_protected,
+                        )
                         if bad_q:
                             continue
                         if unmasked.strip() and unmasked.strip() != row["translated_text"].strip():

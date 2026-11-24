@@ -27,8 +27,9 @@ _ALLOWED_GAME_COLUMNS = {
     "cover_path", "game_description", "compiled_style_card", "tone_preset",
     "style_skill_id", "lang_skill_override", "applied_skill_signature", "engine", "method",
     "anticheat_status", "anticheat_vendors", "anticheat_files", "detected_slots_json",
-    "source_lang", "target_lang", "inject_slot", "scope", "total_strings",
-    "translated_strings", "progress_pct", "is_patched", "last_played_at", "updated_at",
+    "source_lang", "target_lang", "inject_slot", "scope",
+    "preset_level", "ai_mode", "translate_choices", "keep_proper_nouns", "patch_fonts",
+    "total_strings", "translated_strings", "progress_pct", "is_patched", "last_played_at", "updated_at",
 }
 
 
@@ -71,6 +72,11 @@ class LibraryDB:
                     target_lang TEXT DEFAULT 'vi',
                     inject_slot TEXT DEFAULT '',
                     scope TEXT DEFAULT 'FULL_PATCH',
+                    preset_level TEXT DEFAULT 'BALANCED',
+                    ai_mode TEXT DEFAULT 'AUTO_HYBRID',
+                    translate_choices INTEGER DEFAULT 1,
+                    keep_proper_nouns INTEGER DEFAULT 1,
+                    patch_fonts INTEGER DEFAULT 1,
                     game_description TEXT DEFAULT '',
                     tone_preset TEXT DEFAULT 'natural',
                     style_skill_id TEXT DEFAULT 'natural_standard',
@@ -96,6 +102,11 @@ class LibraryDB:
                 ("lang_skill_override", "TEXT DEFAULT 'auto'"),
                 ("applied_skill_signature", "TEXT DEFAULT ''"),
                 ("compiled_style_card", "TEXT DEFAULT ''"),
+                ("preset_level", "TEXT DEFAULT 'BALANCED'"),
+                ("ai_mode", "TEXT DEFAULT 'AUTO_HYBRID'"),
+                ("translate_choices", "INTEGER DEFAULT 1"),
+                ("keep_proper_nouns", "INTEGER DEFAULT 1"),
+                ("patch_fonts", "INTEGER DEFAULT 1"),
             ):
                 if col_name not in existing_cols:
                     conn.execute(f"ALTER TABLE games ADD COLUMN {col_name} {col_def}")
@@ -119,10 +130,15 @@ class LibraryDB:
                 for k, v in record.items():
                     if v is None:
                         continue
-                    # Preserve user-edited/saved game_description, tone_preset, compiled_style_card unless empty
-                    if k in ("game_description", "compiled_style_card") and (existing[k] or "").strip():
+                    # Preserve user-edited/saved profile & basic configuration preferences on re-import/rescan
+                    if k in (
+                        "game_description", "compiled_style_card", "tone_preset",
+                        "style_skill_id", "lang_skill_override",
+                        "source_lang", "target_lang", "inject_slot", "scope",
+                        "preset_level", "ai_mode",
+                    ) and str(existing[k] or "").strip():
                         continue
-                    if k == "tone_preset" and (existing[k] or "").strip():
+                    if k in ("translate_choices", "keep_proper_nouns", "patch_fonts") and existing[k] is not None:
                         continue
                     merged[k] = v
                 merged["game_id"] = game_id
@@ -147,6 +163,11 @@ class LibraryDB:
                     "target_lang": record.get("target_lang", "vi"),
                     "inject_slot": record.get("inject_slot", ""),
                     "scope": record.get("scope", "FULL_PATCH"),
+                    "preset_level": record.get("preset_level", "BALANCED"),
+                    "ai_mode": record.get("ai_mode", "AUTO_HYBRID"),
+                    "translate_choices": int(record.get("translate_choices", 1)),
+                    "keep_proper_nouns": int(record.get("keep_proper_nouns", 1)),
+                    "patch_fonts": int(record.get("patch_fonts", 1)),
                     "game_description": record.get("game_description", ""),
                     "tone_preset": record.get("tone_preset") or "natural",
                     "style_skill_id": record.get("style_skill_id") or record.get("tone_preset") or "natural_standard",
