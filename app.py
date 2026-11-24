@@ -1295,7 +1295,7 @@ async def api_scan_game(game_id: str, req: ScanRequest):
 
     src_lang = req.source_lang or game.get("source_lang") or "en"
     slot_map = {s["slot_id"]: s for s in slots}
-    if src_lang not in slot_map and slots:
+    if slots and (src_lang not in slot_map or not is_qwen_supported_lang(src_lang)):
         src_lang = _pick_default_source_lang(slots)
     tgt_lang = req.target_lang or game.get("target_lang") or "vi"
     if not is_qwen_supported_lang(tgt_lang):

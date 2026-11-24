@@ -57,7 +57,6 @@ const DEFAULT_QWEN_SUPPORTED_LANGS = [
   { code: "pt-BR", label: "Português do Brasil" },
   { code: "it", label: "Italiano (Italian)" },
   { code: "ru", label: "Русский (Russian)" },
-  { code: "pl", label: "Polski (Polish)" },
   { code: "th", label: "ไทย (Thai)" },
   { code: "id", label: "Bahasa Indonesia" },
   { code: "tr", label: "Türkçe (Turkish)" },
@@ -79,7 +78,6 @@ const QWEN_ALIAS_MAP = {
   "pt-br": "pt-BR", ptbr: "pt-BR", brazilian: "pt-BR",
   it: "it", "it-it": "it", italian: "it",
   ru: "ru", "ru-ru": "ru", russian: "ru",
-  pl: "pl", "pl-pl": "pl", polish: "pl",
   th: "th", "th-th": "th", thai: "th",
   id: "id", "id-id": "id", indonesian: "id",
   tr: "tr", "tr-tr": "tr", turkish: "tr",
@@ -1127,10 +1125,11 @@ async function renderSelectedGamePage() {
     }
   }
   const srcSelect = $("selectSourceLang");
-  const rawSrc = g.source_lang || (srcSlots[0]?.slot_id || "en");
+  const rawSrc = g.source_lang || "";
+  const fallbackSrc = srcSlots.find((s) => s.slot_id === "en")?.slot_id || srcSlots[0]?.slot_id || "en";
   state.sourceLang = srcSelect && [...srcSelect.options].some((o) => o.value === rawSrc)
     ? rawSrc
-    : (srcSlots[0]?.slot_id || "en");
+    : fallbackSrc;
   const rawTgt = g.target_lang || "vi";
   state.targetLang = isQwenSupportedLang(rawTgt) ? (normalizeQwenLangCode(rawTgt) || rawTgt) : "vi";
   for (const srcSel of srcSelects) {
