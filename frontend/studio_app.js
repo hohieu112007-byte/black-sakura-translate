@@ -114,20 +114,22 @@ function getLangDisplayLabel(code) {
 }
 
 function populateTargetLangSelect() {
-  const sel = $("selectTargetLang");
-  if (!sel) return;
-  const cur = sel.value || state.targetLang || "vi";
+  const sels = [$("selectTargetLang"), $("selectTargetLangSettings")].filter(Boolean);
+  if (!sels.length) return;
+  const cur = sels[0].value || state.targetLang || "vi";
   const langs = getSupportedLangs();
-  sel.innerHTML = "";
-  for (const item of langs) {
-    const opt = document.createElement("option");
-    opt.value = item.code;
-    opt.textContent = item.label;
-    sel.appendChild(opt);
-  }
   const desired = langs.some((x) => x.code === cur) ? cur : "vi";
   state.targetLang = desired;
-  sel.value = desired;
+  for (const sel of sels) {
+    sel.innerHTML = "";
+    for (const item of langs) {
+      const opt = document.createElement("option");
+      opt.value = item.code;
+      opt.textContent = item.label;
+      sel.appendChild(opt);
+    }
+    sel.value = desired;
+  }
 }
 
 const TONE_LABELS = {
@@ -1111,22 +1113,32 @@ async function renderSelectedGamePage() {
     : allSlots.filter((s) => Number(s.count || 0) > 0).length
     ? allSlots.filter((s) => Number(s.count || 0) > 0)
     : allSlots;
-  const srcSelect = $("selectSourceLang");
-  srcSelect.innerHTML = "";
-  for (const s of srcSlots) {
-    const opt = document.createElement("option");
-    opt.value = s.slot_id;
-    opt.textContent = `${s.label || getLangDisplayLabel(s.slot_id)} [${s.slot_id}] (${s.count || 0})`;
-    srcSelect.appendChild(opt);
+  const srcSelects = [$("selectSourceLang"), $("selectSourceLangSettings")].filter(Boolean);
+  const countFmt = (n) => Number(n || 0).toLocaleString(state.uiLang === "en" ? "en-US" : "vi-VN");
+  const lineUnit = state.uiLang === "en" ? "lines" : "câu";
+  for (const srcSel of srcSelects) {
+    srcSel.innerHTML = "";
+    for (const s of srcSlots) {
+      const opt = document.createElement("option");
+      opt.value = s.slot_id;
+      const baseLabel = s.label || getLangDisplayLabel(s.slot_id);
+      opt.textContent = `${baseLabel} (${s.slot_id}) • ${countFmt(s.count)} ${lineUnit}`;
+      srcSel.appendChild(opt);
+    }
   }
+  const srcSelect = $("selectSourceLang");
   const rawSrc = g.source_lang || (srcSlots[0]?.slot_id || "en");
-  state.sourceLang = [...srcSelect.options].some((o) => o.value === rawSrc)
+  state.sourceLang = srcSelect && [...srcSelect.options].some((o) => o.value === rawSrc)
     ? rawSrc
     : (srcSlots[0]?.slot_id || "en");
   const rawTgt = g.target_lang || "vi";
   state.targetLang = isQwenSupportedLang(rawTgt) ? (normalizeQwenLangCode(rawTgt) || rawTgt) : "vi";
-  if ([...srcSelect.options].some((o) => o.value === state.sourceLang)) srcSelect.value = state.sourceLang;
-  $("selectTargetLang").value = state.targetLang;
+  for (const srcSel of srcSelects) {
+    if ([...srcSel.options].some((o) => o.value === state.sourceLang)) srcSel.value = state.sourceLang;
+  }
+  for (const tgtSel of [$("selectTargetLang"), $("selectTargetLangSettings")].filter(Boolean)) {
+    tgtSel.value = state.targetLang;
+  }
 
   state.rankedSlots = g.ranked_slots || [];
   state.injectSlot = g.inject_slot || state.rankedSlots[0]?.slot_id || state.sourceLang;
@@ -1301,21 +1313,55 @@ async function fetchSteamContextForGame(gameId, silent = false) {
   }
 }
 
+function setSlotDrawerOpen(open) {
+  const drawer = $("inlineSlotCollapse");
+  const btn = $("btnToggleSlotDrawer");
+  const chev = $("slotDrawerChevron");
+  if (!drawer) return;
+  const shouldOpen = Boolean(open);
+  drawer.classList.toggle("hidden", !shouldOpen);
+  if (btn) btn.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+  if (chev) chev.textContent = shouldOpen ? "▴" : "▾";
+}
+
+function setSyncedPresetBadge(text) {
+  if ($("activePresetBadge")) $("activePresetBadge").textContent = text;
+  if ($("settingsPresetBadge")) $("settingsPresetBadge").textContent = text;
+}
+
 function renderSlotGrids() {
   const grids = [$("slotCardsGrid"), $("slotCardsGridQuick")].filter(Boolean);
   const list = state.rankedSlots || [];
   const activeItem = list.find((s) => s.slot_id === state.injectSlot) || list[0];
+  const badgeEl = $("activeSlotBadge");
+  const hintEl = $("activeSlotHint");
   if (activeItem) {
     state.injectSlot = activeItem.slot_id;
-    $("activeSlotSummary").textContent = `${activeItem.display_name || activeItem.slot_id} (${activeItem.slot_id}) • ${activeItem.badge}`;
+    $("activeSlotSummary").textContent = `${activeItem.display_name || activeItem.slot_id} (${activeItem.slot_id})`;
+    if (badgeEl) {
+      badgeEl.classList.remove("hidden");
+      badgeEl.className = `slot-badge ${activeItem.recommended ? "rec" : "norm"}`;
+      badgeEl.textContent = activeItem.badge || (activeItem.recommended ? "★ ĐỀ XUẤT" : "SLOT");
+    }
+    const guideText = String(activeItem.settings_guide || "").trim();
+    if (hintEl) {
+      hintEl.textContent = guideText ? `• ${guideText}` : "";
+      hintEl.title = guideText;
+    }
     $("slotGuideBox").textContent = state.uiLang === "en"
-      ? `💡 In-game language guide: ${activeItem.settings_guide || ""}`
-      : `💡 Hướng dẫn bật trong game: ${activeItem.settings_guide || ""}`;
+      ? `💡 In-game language guide: ${guideText}`
+      : `💡 Hướng dẫn bật trong game: ${guideText}`;
   } else {
     $("activeSlotSummary").textContent = state.uiLang === "en" ? "No available slot" : "Chưa có slot khả dụng";
+    if (badgeEl) badgeEl.classList.add("hidden");
+    if (hintEl) {
+      hintEl.textContent = "";
+      hintEl.title = "";
+    }
   }
 
   for (const grid of grids) {
+    const isQuickGrid = grid.id === "slotCardsGridQuick";
     grid.innerHTML = "";
     for (const s of list) {
       const card = document.createElement("div");
@@ -1331,6 +1377,7 @@ function renderSlotGrids() {
         state.injectSlot = s.slot_id;
         fireSakugaVfx(card, "tap");
         renderSlotGrids();
+        if (isQuickGrid) setSlotDrawerOpen(false);
         const g = selectedGame();
         if (g) {
           g.inject_slot = s.slot_id;
@@ -1356,7 +1403,7 @@ function applyPresetLevel(levelKey, triggerVfx = true) {
   state.scope = def.scope;
 
   document.querySelectorAll(".preset-card").forEach((c) => c.classList.toggle("active", c.dataset.preset === levelKey));
-  $("activePresetBadge").textContent = typeof window.tUI === "function" ? window.tUI(`preset_badge_${levelKey}`) : def.badge;
+  setSyncedPresetBadge(typeof window.tUI === "function" ? window.tUI(`preset_badge_${levelKey}`) : def.badge);
 
   document.querySelectorAll("#scopeSegmented .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.scope === def.scope));
   $("subOptionsDrawer").classList.toggle("hidden", def.scope !== "SUB_ONLY");
@@ -1366,9 +1413,13 @@ function applyPresetLevel(levelKey, triggerVfx = true) {
   $("chkKeepProperNouns").checked = def.keepProperNouns;
   $("chkPatchFonts").checked = def.patchFonts;
 
+  // Preserve user's explicitly selected injectSlot if it's valid; only auto-pick if unset/invalid
   if (state.rankedSlots.length) {
-    const rec = state.rankedSlots.find((s) => s.recommended) || state.rankedSlots[0];
-    state.injectSlot = rec.slot_id;
+    const stillValid = state.rankedSlots.some((s) => s.slot_id === state.injectSlot);
+    if (!stillValid) {
+      const rec = state.rankedSlots.find((s) => s.recommended) || state.rankedSlots[0];
+      state.injectSlot = rec.slot_id;
+    }
     renderSlotGrids();
   }
 
@@ -1408,9 +1459,32 @@ function renderPresetEstimates(estimates) {
 }
 
 function markCustomPresetIfModified() {
+  const choices = Boolean($("chkTranslateChoices")?.checked);
+  const keepNouns = Boolean($("chkKeepProperNouns")?.checked);
+  const patchFonts = Boolean($("chkPatchFonts")?.checked);
+
+  // Check if current settings match one of the 3 presets so Overview & Full Settings stay unified
+  for (const [key, def] of Object.entries(PRESET_DEFS)) {
+    const subMatch = def.scope !== "SUB_ONLY" || (choices === def.translateChoices && keepNouns === def.keepProperNouns);
+    if (state.scope === def.scope && state.aiMode === def.aiMode && patchFonts === def.patchFonts && subMatch) {
+      state.preset = key;
+      document.querySelectorAll(".preset-card").forEach((c) => c.classList.toggle("active", c.dataset.preset === key));
+      setSyncedPresetBadge(typeof window.tUI === "function" ? window.tUI(`preset_badge_${key}`) : def.badge);
+      return;
+    }
+  }
+
   state.preset = "CUSTOM";
   document.querySelectorAll(".preset-card").forEach((c) => c.classList.remove("active"));
-  $("activePresetBadge").textContent = typeof window.tUI === "function" ? window.tUI("preset_badge_CUSTOM") : "TÙY CHỈNH THỦ CÔNG";
+  const isEn = state.uiLang === "en";
+  const scopeShort = state.scope === "SUB_ONLY"
+    ? (isEn ? "Sub Only" : "Chỉ Sub")
+    : state.scope === "UI_ONLY"
+    ? (isEn ? "UI Only" : "Chỉ UI")
+    : (isEn ? "Full" : "Toàn bộ");
+  const aiShort = state.aiMode === "FLASH" ? "Flash" : state.aiMode === "DEEP_THINK" ? "Deep-Think" : "Auto-Hybrid";
+  const prefix = isEn ? "CUSTOM" : "TÙY CHỈNH";
+  setSyncedPresetBadge(`${prefix} • ${scopeShort} • ${aiShort}`);
 }
 
 // ---------------- Monitor & Inline Editor ---------------- //
@@ -2802,7 +2876,10 @@ function bindEvents() {
   $("btnOpenSettingsDrawer").addEventListener("click", () => switchSubtab(state.subtab === "settings" ? "overview" : "settings"));
   $("btnLinkToFullSettings").addEventListener("click", () => switchSubtab("settings"));
   $("btnViewAllLive").addEventListener("click", () => switchSubtab("live"));
-  $("btnToggleSlotDrawer").addEventListener("click", () => $("inlineSlotCollapse").classList.toggle("hidden"));
+  $("btnToggleSlotDrawer").addEventListener("click", () => {
+    const isCurrentlyHidden = $("inlineSlotCollapse").classList.contains("hidden");
+    setSlotDrawerOpen(isCurrentlyHidden);
+  });
 
   // Collapsible Game Context & Style Card events
   $("btnToggleContextDrawer").addEventListener("click", () => {
@@ -2976,8 +3053,44 @@ function bindEvents() {
     const g = selectedGame();
     if (g) await api(`/api/games/${g.game_id}/profile`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ launch_mode: e.target.value }) });
   });
-  $("selectSourceLang").addEventListener("change", (e) => { state.sourceLang = e.target.value; rerankSlots(); });
-  $("selectTargetLang").addEventListener("change", (e) => { state.targetLang = e.target.value; rerankSlots(); });
+  const handleSourceLangChange = (val) => {
+    state.sourceLang = val;
+    for (const sel of [$("selectSourceLang"), $("selectSourceLangSettings")].filter(Boolean)) {
+      if (sel.value !== val) sel.value = val;
+    }
+    const g = selectedGame();
+    if (g) {
+      g.source_lang = val;
+      renderGameContextCard(g);
+      api(`/api/games/${g.game_id}/profile`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_lang: val }),
+      }).catch(() => {});
+    }
+    rerankSlots();
+  };
+  const handleTargetLangChange = (val) => {
+    state.targetLang = val;
+    for (const sel of [$("selectTargetLang"), $("selectTargetLangSettings")].filter(Boolean)) {
+      if (sel.value !== val) sel.value = val;
+    }
+    const g = selectedGame();
+    if (g) {
+      g.target_lang = val;
+      renderGameContextCard(g);
+      api(`/api/games/${g.game_id}/profile`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_lang: val }),
+      }).catch(() => {});
+    }
+    rerankSlots();
+  };
+  $("selectSourceLang").addEventListener("change", (e) => handleSourceLangChange(e.target.value));
+  $("selectSourceLangSettings")?.addEventListener("change", (e) => handleSourceLangChange(e.target.value));
+  $("selectTargetLang").addEventListener("change", (e) => handleTargetLangChange(e.target.value));
+  $("selectTargetLangSettings")?.addEventListener("change", (e) => handleTargetLangChange(e.target.value));
 
   document.querySelectorAll("#scopeSegmented .seg-btn").forEach((b) => {
     b.addEventListener("click", () => {

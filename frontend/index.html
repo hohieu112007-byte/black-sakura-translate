@@ -239,64 +239,75 @@
         <!-- SUBTAB 1: MINIMALIST ESSENTIALS (DEFAULT!) -->
         <div id="paneOverview" class="subtab-pane active">
           <div class="overview-grid">
-            <!-- Left Minimalist Card: Language Pair + 3 Presets -->
+            <!-- Left Minimalist Card: Unified Language/Slot + 3 Presets -->
             <div class="panel-card">
               <div class="card-header">
                 <span class="section-label" data-i18n="basic_cfg_title">CẤU HÌNH CƠ BẢN</span>
-                <button id="btnLinkToFullSettings" class="link-btn" data-i18n="btn_custom_slot_scope">Tùy chỉnh Slot &amp; Phạm vi ➔</button>
+                <button id="btnLinkToFullSettings" type="button" class="btn btn-ghost btn-sm cfg-link-btn" data-i18n="btn_custom_slot_scope">⚙ Cài đặt đầy đủ ➔</button>
               </div>
 
-              <!-- Quick Target Language + Auto Recommended Slot Summary -->
-              <div class="basic-lang-bar">
-                <div class="basic-lang-item">
-                  <label data-i18n="lbl_src_lang">Ngôn ngữ gốc trong game</label>
-                  <select id="selectSourceLang" class="select-full"></select>
+              <!-- Unified Language Pair + Inject Slot Surface (Mirrors Full Settings) -->
+              <div class="lang-slot-box">
+                <div class="basic-lang-bar">
+                  <div class="basic-lang-item">
+                    <label for="selectSourceLang" data-i18n="lbl_src_lang">Ngôn ngữ gốc</label>
+                    <select id="selectSourceLang" class="select-full"></select>
+                  </div>
+                  <div class="pair-arrow" aria-hidden="true">➔</div>
+                  <div class="basic-lang-item">
+                    <label for="selectTargetLang" data-i18n="lbl_tgt_lang">Dịch sang</label>
+                    <select id="selectTargetLang" class="select-full">
+                      <option value="vi">Tiếng Việt (Vietnamese)</option>
+                      <option value="en">English</option>
+                      <option value="zh">简体中文 (Simplified Chinese)</option>
+                      <option value="zh-TW">繁體中文 (Traditional Chinese)</option>
+                      <option value="ja">日本語 (Japanese)</option>
+                      <option value="ko">한국어 (Korean)</option>
+                      <option value="fr">Français (French)</option>
+                      <option value="es">Español (Spanish)</option>
+                      <option value="de">Deutsch (German)</option>
+                      <option value="pt">Português (Portuguese)</option>
+                      <option value="pt-BR">Português do Brasil</option>
+                      <option value="it">Italiano (Italian)</option>
+                      <option value="ru">Русский (Russian)</option>
+                      <option value="pl">Polski (Polish)</option>
+                      <option value="th">ไทย (Thai)</option>
+                      <option value="id">Bahasa Indonesia</option>
+                      <option value="tr">Türkçe (Turkish)</option>
+                      <option value="ar">العربية (Arabic)</option>
+                      <option value="nl">Nederlands (Dutch)</option>
+                    </select>
+                  </div>
                 </div>
-                <div class="pair-arrow">➔</div>
-                <div class="basic-lang-item">
-                  <label><span data-i18n="lbl_tgt_lang">Ngôn ngữ dịch ra</span> (<span id="activeModelShortLabel">AI Local</span>)</label>
-                  <select id="selectTargetLang" class="select-full">
-                    <option value="vi">Tiếng Việt (Vietnamese)</option>
-                    <option value="en">English</option>
-                    <option value="zh">简体中文 (Simplified Chinese)</option>
-                    <option value="zh-TW">繁體中文 (Traditional Chinese)</option>
-                    <option value="ja">日本語 (Japanese)</option>
-                    <option value="ko">한국어 (Korean)</option>
-                    <option value="fr">Français (French)</option>
-                    <option value="es">Español (Spanish)</option>
-                    <option value="de">Deutsch (German)</option>
-                    <option value="pt">Português (Portuguese)</option>
-                    <option value="pt-BR">Português do Brasil</option>
-                    <option value="it">Italiano (Italian)</option>
-                    <option value="ru">Русский (Russian)</option>
-                    <option value="pl">Polski (Polish)</option>
-                    <option value="th">ไทย (Thai)</option>
-                    <option value="id">Bahasa Indonesia</option>
-                    <option value="tr">Türkçe (Turkish)</option>
-                    <option value="ar">العربية (Arabic)</option>
-                    <option value="nl">Nederlands (Dutch)</option>
-                  </select>
+
+                <div class="auto-slot-strip">
+                  <div class="auto-slot-main">
+                    <div class="auto-slot-meta">
+                      <span class="auto-slot-lbl" data-i18n="lbl_rec_slot">Slot chèn vào game</span>
+                      <span id="activeSlotBadge" class="slot-badge rec">★ ĐỀ XUẤT</span>
+                    </div>
+                    <div class="auto-slot-val-row">
+                      <span id="activeSlotSummary" class="auto-slot-val" data-i18n="slot_auto_loading">Tự động chọn slot tốt nhất...</span>
+                      <span id="activeSlotHint" class="auto-slot-hint"></span>
+                    </div>
+                  </div>
+                  <button id="btnToggleSlotDrawer" type="button" class="btn btn-outline btn-sm" aria-expanded="false">
+                    <span data-i18n="btn_change_slot">Đổi Slot</span> <span id="slotDrawerChevron">▾</span>
+                  </button>
+                </div>
+
+                <!-- Inline Quick Slot Picker (Same cards as Full Settings) -->
+                <div id="inlineSlotCollapse" class="inline-collapse hidden">
+                  <div id="slotCardsGridQuick" class="slot-cards-grid"></div>
                 </div>
               </div>
 
-              <div class="auto-slot-strip">
-                <div>
-                  <span class="mono-mini" data-i18n="lbl_rec_slot">SLOT CHÈN ĐỀ XUẤT HIỆN TẠI</span>
-                  <div id="activeSlotSummary" class="auto-slot-val" data-i18n="slot_auto_loading">Tự động chọn slot tốt nhất...</div>
-                </div>
-                <button id="btnToggleSlotDrawer" class="btn btn-ghost btn-sm" data-i18n="btn_change_slot">Đổi Slot ▾</button>
-              </div>
-
-              <!-- Optional Inline Quick Slot Drawer (Hidden unless user clicks "Đổi Slot") -->
-              <div id="inlineSlotCollapse" class="inline-collapse hidden">
-                <div id="slotCardsGridQuick" class="slot-cards-grid"></div>
-              </div>
-
-              <!-- 3-Tier Preset Cards (Compact Pill Grid, no redundant slider) -->
+              <!-- 3-Tier Preset Cards (Compact Pill Grid, synced with Full Settings) -->
               <div class="tier-header">
                 <div class="header-title-with-tip">
                   <span class="section-label" data-i18n="tier_title">CHỌN 1 TRONG 3 MỨC ĐỘ DỊCH</span>
-                  <sakuga-tooltip text="Chọn 1 thẻ để tự cấu hình toàn bộ AI, Phạm vi &amp; Slot bên trong Cài đặt." label="Giải thích 3 mức độ">?</sakuga-tooltip>
+                  <sakuga-tooltip text="Chọn 1 thẻ để tự cấu hình Phạm vi &amp; AI trong Cài đặt đầy đủ (giữ nguyên Slot đã chọn)." label="Giải thích 3 mức độ">?</sakuga-tooltip>
+                  <span class="tier-model-chip" title="Model AI Local đang chạy">🤖 <span id="activeModelShortLabel">AI Local</span></span>
                 </div>
                 <span id="activePresetBadge" class="badge">CẤP 2 • CÂN BẰNG</span>
               </div>
@@ -520,17 +531,36 @@
           <div class="settings-two-col">
             <div class="panel-card">
               <div class="card-header">
-                <span class="section-label" data-i18n="set_slot_title">1. SLOT NGÔN NGỮ &amp; CÀI ĐẶT CHÈN FILE</span>
-                <button id="btnRescanGame" class="btn btn-ghost btn-sm" data-i18n="btn_rescan">↻ Quét lại game</button>
+                <span class="section-label" data-i18n="set_slot_title">1. NGÔN NGỮ &amp; SLOT CHÈN FILE</span>
+                <button id="btnRescanGame" type="button" class="btn btn-ghost btn-sm" data-i18n="btn_rescan">↻ Quét lại game</button>
               </div>
+
+              <!-- Synced Language Pair (Identical to Basic Config) -->
+              <div class="basic-lang-bar settings-lang-bar">
+                <div class="basic-lang-item">
+                  <label for="selectSourceLangSettings" data-i18n="lbl_src_lang">Ngôn ngữ gốc</label>
+                  <select id="selectSourceLangSettings" class="select-full"></select>
+                </div>
+                <div class="pair-arrow" aria-hidden="true">➔</div>
+                <div class="basic-lang-item">
+                  <label for="selectTargetLangSettings" data-i18n="lbl_tgt_lang">Dịch sang</label>
+                  <select id="selectTargetLangSettings" class="select-full"></select>
+                </div>
+              </div>
+
+              <div class="settings-divider" style="margin:10px 0;"></div>
+
               <div id="dedupStatsBanner" class="stats-row" style="margin-bottom:10px;">
                 <span class="stat-chip"><span data-i18n="stat_raw_lbl">Tổng gốc:</span> <strong id="statRawCount">0</strong></span>
                 <span class="stat-chip"><span data-i18n="stat_tm_lbl">TM 0ms:</span> <strong id="statTmHits">0</strong></span>
                 <span class="stat-chip stat-fold hidden" id="statTemplateFoldChip"><span data-i18n="stat_fold_lbl">Gộp mẫu số:</span> <strong id="statFoldSaved">0</strong></span>
                 <span class="stat-chip" id="studioEngineMethod">--</span>
               </div>
-              <div id="slotCardsGrid" class="slot-cards-grid"></div>
-              <div id="slotGuideBox" class="slot-guide-box" style="margin-top:10px;" data-i18n="slot_guide_default">
+              <div class="control-block" style="margin-bottom:8px;">
+                <label class="sub-label" data-i18n="lbl_rec_slot">Slot chèn vào game</label>
+                <div id="slotCardsGrid" class="slot-cards-grid"></div>
+              </div>
+              <div id="slotGuideBox" class="slot-guide-box" style="margin-top:8px;" data-i18n="slot_guide_default">
                 Chọn 1 slot ở trên để xem hướng dẫn bật ngôn ngữ trong Settings game.
               </div>
             </div>
@@ -538,6 +568,7 @@
             <div class="panel-card">
               <div class="card-header">
                 <span class="section-label" data-i18n="set_scope_ai_title">2. PHẠM VI DỊCH, AI ENGINE &amp; KHỞI CHẠY</span>
+                <span id="settingsPresetBadge" class="badge">CẤP 2 • CÂN BẰNG</span>
               </div>
 
               <div class="control-block">
