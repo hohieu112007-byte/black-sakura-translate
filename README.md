@@ -1,11 +1,11 @@
 # Black Sakura Translate
 
-[![Tải App Windows (Latest Release)](https://img.shields.io/badge/TẢI_APP_NGAY-Release_v1.0.2_(Windows)-ff5fa8?style=for-the-badge&logo=github)](https://github.com/hohieu112007-byte/black-sakura-translate/releases/latest)
+[![Tải App Windows (Latest Release)](https://img.shields.io/badge/TẢI_APP_NGAY-Release_v1.0.3_(Windows)-ff5fa8?style=for-the-badge&logo=github)](https://github.com/hohieu112007-byte/black-sakura-translate/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 
 **Black Sakura Translate** là ứng dụng Việt hóa / đa ngôn ngữ hóa game PC **hoàn toàn miễn phí, chạy 100% AI cục bộ (Local AI qua Ollama)** với giao diện phong cách **Steam Desktop** hiện đại. Không cần API trả phí, không gửi dữ liệu ra máy chủ ngoài, bảo vệ file game gốc bằng hệ thống an toàn 6 lớp.
 
-> **👉 Tải nhanh cho người dùng (không cần biết code):** Bấm nút **[TẢI APP NGAY (Release v1.0.2)](https://github.com/hohieu112007-byte/black-sakura-translate/releases/latest)** hoặc nhìn cột **Releases** bên phải trang GitHub -> tải **`Black-Sakura-Translate-v1.0.2-Windows-Standalone.zip`**, giải nén và nháy đúp **`BlackSakuraTranslate.exe`**!
+> **👉 Tải nhanh cho người dùng (không cần biết code):** Bấm nút **[TẢI APP NGAY (Release v1.0.3)](https://github.com/hohieu112007-byte/black-sakura-translate/releases/latest)** hoặc nhìn cột **Releases** bên phải trang GitHub -> tải **`Black-Sakura-Translate-v1.0.3-Windows-Standalone.zip`**, giải nén và nháy đúp **`BlackSakuraTranslate.exe`**!
 
 ---
 
@@ -100,12 +100,12 @@
 ## Cài đặt & Khởi chạy nhanh
 
 ### Cách 1: Tải bản Độc lập `.EXE` (Không cần cài Python — Khuyên dùng!)
-1. Mở trang **[Releases mới nhất](https://github.com/hohieu112007-byte/black-sakura-translate/releases/latest)** và tải file **`Black-Sakura-Translate-v1.0.2-Windows-Standalone.zip`**.
+1. Mở trang **[Releases mới nhất](https://github.com/hohieu112007-byte/black-sakura-translate/releases/latest)** và tải file **`Black-Sakura-Translate-v1.0.3-Windows-Standalone.zip`**.
 2. Giải nén ra bất kỳ thư mục nào và nháy đúp **`BlackSakuraTranslate.exe`**.
 3. Cài **[Ollama](https://ollama.com/download)** (nếu máy chưa có) — khi Ollama đã cài, app sẽ **tự bật ngầm máy chủ Ollama** và tự kết nối mà bạn không cần mở Ollama thủ công; nếu chưa có model, bấm **⬇ Tải ngay `qwen3.5:4b`** ngay trong app.
 
 ### Cách 2: Chạy bản Portable / Mã nguồn (Nếu máy có Python 3.10+)
-1. Tải **`Black-Sakura-Translate-v1.0.2-Source.zip`** tại mục Releases (hoặc `git clone` bên dưới) rồi giải nén.
+1. Tải **`Black-Sakura-Translate-v1.0.3-Source.zip`** tại mục Releases (hoặc `git clone` bên dưới) rồi giải nén.
 2. Nháy đúp **`Start_Black_Sakura_Translate.bat`** — script tự cài các thư viện trong `requirements.txt` nếu thiếu và mở ứng dụng.
 
 ### Cách 3: Chạy bằng dòng lệnh (CLI cho Developer)

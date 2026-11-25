@@ -291,6 +291,7 @@ def _sharedassets_sort_key(path: Path) -> Tuple[int, str]:
 def find_unity_loc_candidates(game_dir: Path) -> Dict[str, List[Path]]:
     """Locate native localization bundles (Addressables & StreamingAssets), resources.assets, and sharedassets*.assets."""
     bundles: List[Path] = []
+    aa_other_bundles: List[Path] = []
     resource_assets: List[Path] = []
     data_dirs = sorted([p for p in game_dir.iterdir() if p.is_dir() and p.name.endswith("_Data")])
 
@@ -319,6 +320,12 @@ def find_unity_loc_candidates(game_dir: Path) -> Dict[str, List[Path]]:
                         if bf.stat().st_size <= 25 * 1024 * 1024:
                             seen_bundles.add(bf)
                             bundles.append(bf)
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        if bf.stat().st_size <= 30 * 1024 * 1024:
+                            aa_other_bundles.append(bf)
                     except OSError:
                         pass
 
@@ -362,8 +369,10 @@ def find_unity_loc_candidates(game_dir: Path) -> Dict[str, List[Path]]:
             except OSError:
                 pass
 
+    aa_other_bundles.sort(key=lambda p: p.stat().st_size if p.exists() else 0)
     return {
         "bundles": sorted(bundles),
+        "aa_other_bundles": aa_other_bundles[:25],
         "resources": resource_assets,
         "data_dirs": data_dirs,
     }
@@ -821,8 +830,8 @@ def _parse_binary_i2_source(raw: bytes, sf_version: int) -> Optional[Dict[str, A
                 continue
             terms, terms_end, has_touch = terms_parsed
             gap = lang_off - terms_end
-            # Typical gap between mTerms and mLanguages in LanguageSourceData is CaseInsensitiveTerms(4) + OnMissingTranslation(4) + mTerm_AppName(string) (~8..96 bytes)
-            if 0 <= gap <= 256:
+            # Typical gap between mTerms and mLanguages in LanguageSourceData (includes flags, AppName, optional Assets/Google fields)
+            if 0 <= gap <= 4096:
                 return {
                     "m_Name": hdr["mb_name"],
                     "prefix_bytes": raw[:term_off],
@@ -941,6 +950,57 @@ def _count_csv_non_empty_rows(text: str, delim: str, col_hdr: str) -> int:
         return 0
 
 
+def _infer_lang_from_sample_texts(texts: List[str], fallback: str = "en") -> str:
+    """Infer source language from sample strings (handles single-language English or CJK/Cyrillic tables)."""
+    sample = " ".join(str(t) for t in texts[:60] if t)[:4000]
+    if not sample.strip():
+        return fallback
+    if re.search(r"[\u3040-\u30ff]", sample):
+        return "ja"
+    if re.search(r"[\uac00-\ud7af]", sample):
+        return "ko"
+    if re.search(r"[\u4e00-\u9fff]", sample):
+        return "zh"
+    if re.search(r"[\u0400-\u04ff]", sample):
+        return "ru"
+    if re.search(r"[ăâđêôơưĂÂĐÊÔƠƯ]", sample):
+        return "vi"
+    return fallback
+
+
+def _sniff_single_csv_column(text: str) -> Optional[Tuple[str, int, int, List[str]]]:
+    """Detect single-language CSV/TSV (e.g. Key,Text or Key,Value) in localization text."""
+    for delim in (",", ";", "\t"):
+        try:
+            rows = list(csv.reader(io.StringIO(text[:65536]), delimiter=delim))
+        except Exception:
+            continue
+        if len(rows) < 4 or not rows[0]:
+            continue
+        headers = [h.strip() for h in rows[0]]
+        if len(headers) == 1 and "\t" not in text[:1024] and "," not in text[:1024] and ";" not in text[:1024]:
+            continue
+        # Pick value column by known header names or column 1 (Key, Text)
+        val_col = -1
+        for i, h in enumerate(headers):
+            hl = h.lower()
+            if hl in ("text", "value", "string", "english", "en", "localized", "translation", "source", "content", "dialogue"):
+                val_col = i
+                break
+        if val_col == -1:
+            val_col = 1 if len(headers) >= 2 else 0
+        samples: List[str] = []
+        valid_cnt = 0
+        for r in rows[1:]:
+            if val_col < len(r) and is_translatable_string(r[val_col]):
+                valid_cnt += 1
+                if len(samples) < 40:
+                    samples.append(r[val_col])
+        if valid_cnt >= 3:
+            return delim, val_col, valid_cnt, samples
+    return None
+
+
 def _scan_text_asset(obj: Any, asset_file: Path, slots: Dict[str, Dict[str, Any]]) -> None:
     """Detect localization tables stored as Unity TextAsset (CSV/TSV, JSON, XML, PO, KV)."""
     try:
@@ -950,7 +1010,8 @@ def _scan_text_asset(obj: Any, asset_file: Path, slots: Dict[str, Dict[str, Any]
         return
     name_low = name.lower()
     name_code = normalize_lang_token(name)
-    if not any(tok in name_low for tok in _TEXTASSET_HINT_TOKENS) and not is_known_lang_code(name_code):
+    has_hint = any(tok in name_low for tok in _TEXTASSET_HINT_TOKENS)
+    if not has_hint and not is_known_lang_code(name_code):
         return
 
     text = _decode_textasset_script(ta)
@@ -1008,6 +1069,14 @@ def _scan_text_asset(obj: Any, asset_file: Path, slots: Dict[str, Dict[str, Any]
                 )
         return
 
+    # 1b. Single-language CSV/TSV (e.g. Key,Text or Key,Value in single-English games)
+    single_csv = _sniff_single_csv_column(text)
+    if single_csv:
+        delim, col_idx, cnt, samples = single_csv
+        code = name_code if is_known_lang_code(name_code) else _infer_lang_from_sample_texts(samples)
+        _add_ta_slot(code, name or code, "Unity TextAsset (CSV)", "csv_single", cnt, {"delimiter": delim, "col_idx": col_idx})
+        return
+
     # 2. JSON (multi-language top-level dict OR single-language dict/array)
     if stripped.startswith("{") or stripped.startswith("["):
         try:
@@ -1030,23 +1099,24 @@ def _scan_text_asset(obj: Any, asset_file: Path, slots: Dict[str, Dict[str, Any]
                             {"json_lang_key": str(lk)},
                         )
                 return
-        if data is not None and is_known_lang_code(name_code):
+        if data is not None:
             strings = _walk_json_strings_local(data)
-            if len(strings) >= 3:
+            if is_known_lang_code(name_code) and len(strings) >= 3:
                 _add_ta_slot(name_code, name, "Unity TextAsset (JSON)", "json_single", len(strings))
                 return
-
-    # Require known language token for single-language XML/PO/KV TextAssets
-    if not is_known_lang_code(name_code):
-        return
+            if has_hint and len(strings) >= 5:
+                inferred = _infer_lang_from_sample_texts([v for _, v in strings])
+                _add_ta_slot(inferred, name or inferred, "Unity TextAsset (JSON)", "json_single", len(strings))
+                return
 
     # 3. Single-language XML
     if stripped.startswith("<"):
         try:
             root_xml = ET.fromstring(text)
-            cnt = sum(1 for el in root_xml.iter() if el.text and is_translatable_string(el.text))
-            if cnt >= 3:
-                _add_ta_slot(name_code, name, "Unity TextAsset (XML)", "xml_single", cnt)
+            vals = [el.text for el in root_xml.iter() if el.text and is_translatable_string(el.text)]
+            if (is_known_lang_code(name_code) and len(vals) >= 3) or (has_hint and len(vals) >= 5):
+                code = name_code if is_known_lang_code(name_code) else _infer_lang_from_sample_texts(vals)
+                _add_ta_slot(code, name or code, "Unity TextAsset (XML)", "xml_single", len(vals))
                 return
         except Exception:
             pass
@@ -1055,15 +1125,20 @@ def _scan_text_asset(obj: Any, asset_file: Path, slots: Dict[str, Dict[str, Any]
     if "msgid " in text[:2048] and "msgstr " in text[:2048]:
         try:
             po = polib.pofile(text)
-            cnt = sum(1 for e in po if is_translatable_string(e.msgstr if e.msgstr.strip() else e.msgid))
-            if cnt >= 3:
-                _add_ta_slot(name_code, name, "Unity TextAsset (PO)", "po_single", cnt)
+            vals = [
+                (e.msgstr if e.msgstr.strip() else e.msgid)
+                for e in po
+                if is_translatable_string(e.msgstr if e.msgstr.strip() else e.msgid)
+            ]
+            if (is_known_lang_code(name_code) and len(vals) >= 3) or (has_hint and len(vals) >= 5):
+                code = name_code if is_known_lang_code(name_code) else _infer_lang_from_sample_texts(vals)
+                _add_ta_slot(code, name or code, "Unity TextAsset (PO)", "po_single", len(vals))
                 return
         except Exception:
             pass
 
     # 5. Single-language Key=Value
-    kv_cnt = 0
+    kv_vals: List[str] = []
     for line in text.splitlines():
         if line.lstrip().startswith(("#", ";", "[")):
             continue
@@ -1071,9 +1146,10 @@ def _scan_text_asset(obj: Any, asset_file: Path, slots: Dict[str, Dict[str, Any]
         if sep:
             _, v = line.split(sep, 1)
             if is_translatable_string(v):
-                kv_cnt += 1
-    if kv_cnt >= 3:
-        _add_ta_slot(name_code, name, "Unity TextAsset (Text)", "kv_single", kv_cnt)
+                kv_vals.append(v)
+    if (is_known_lang_code(name_code) and len(kv_vals) >= 3) or (has_hint and len(kv_vals) >= 5):
+        code = name_code if is_known_lang_code(name_code) else _infer_lang_from_sample_texts(kv_vals)
+        _add_ta_slot(code, name or code, "Unity TextAsset (Text)", "kv_single", len(kv_vals))
 
 
 def _extract_from_text_asset(
@@ -1090,13 +1166,18 @@ def _extract_from_text_asset(
     fmt_kind = ta_meta.get("format", "")
     ta_name = getattr(ta, "m_Name", "") or fpath.stem
 
-    if fmt_kind == "csv_multi":
+    if fmt_kind in ("csv_multi", "csv_single"):
         delim = ta_meta.get("delimiter", ",")
-        col_name = ta_meta.get("column", "")
         rows = list(csv.reader(io.StringIO(text), delimiter=delim))
-        if not rows or col_name not in rows[0]:
+        if not rows:
             return entries
-        col_idx = rows[0].index(col_name)
+        if fmt_kind == "csv_multi":
+            col_name = ta_meta.get("column", "")
+            if col_name not in rows[0]:
+                return entries
+            col_idx = rows[0].index(col_name)
+        else:
+            col_idx = int(ta_meta.get("col_idx", 1 if len(rows[0]) >= 2 else 0))
         for r_i in range(1, len(rows)):
             row = rows[r_i]
             if col_idx >= len(row):
@@ -1209,12 +1290,18 @@ def _patch_text_asset_script(
     updated = 0
     new_text: Optional[str] = None
 
-    if fmt_kind == "csv_multi":
+    if fmt_kind in ("csv_multi", "csv_single"):
         delim = ta_meta.get("delimiter", ",")
-        col_name = ta_meta.get("column", "")
         rows = list(csv.reader(io.StringIO(text), delimiter=delim))
-        if rows and col_name in rows[0]:
-            col_idx = rows[0].index(col_name)
+        col_idx = -1
+        if rows:
+            if fmt_kind == "csv_multi":
+                col_name = ta_meta.get("column", "")
+                if col_name in rows[0]:
+                    col_idx = rows[0].index(col_name)
+            else:
+                col_idx = int(ta_meta.get("col_idx", 1 if len(rows[0]) >= 2 else 0))
+        if rows and col_idx >= 0:
             src_by_row = {
                 e.location_meta.get("row_idx"): (by_key.get(e.key) or by_src_text.get(e.text))
                 for e in source_entries
@@ -1349,8 +1436,7 @@ def scan_unity_loc_tables(game_dir: str | Path) -> List[Dict[str, Any]]:
             slot["raw_binary"] = True
         slot["count"] += count
 
-    # 1. Addressables & StreamingAssets AssetBundles (StringTable, I2Languages, TextAsset)
-    for bf in candidates["bundles"]:
+    def _scan_bundle_file(bf: Path) -> None:
         lang_hint = normalize_lang_token(bf.stem)
         try:
             env = UnityPy.load(str(bf))
@@ -1396,6 +1482,10 @@ def scan_unity_loc_tables(game_dir: str | Path) -> List[Dict[str, Any]]:
                             _register_i2_slots(i2_bin, bf, slots, provider="Unity I2 Localization (IL2CPP Binary)", raw_binary=True)
         except Exception as exc:
             logger.debug("Skipping Unity bundle %s: %s", bf.name, exc)
+
+    # 1. Addressables & StreamingAssets AssetBundles (StringTable, I2Languages, TextAsset)
+    for bf in candidates["bundles"]:
+        _scan_bundle_file(bf)
 
     # 2. Check resources.assets & startup sharedassets*.assets for I2Languages Prefabs, StringTable & TextAsset
     for rf in candidates["resources"]:
@@ -1447,6 +1537,11 @@ def scan_unity_loc_tables(game_dir: str | Path) -> List[Dict[str, Any]]:
                             _register_st_slot(loc_code, mb_name or go_name or "en", rf, f"Unity StringTable ({rf.name} Binary)", cnt, raw_binary=True)
         except Exception as exc:
             logger.debug("Skipping Unity resource %s: %s", rf.name, exc)
+
+    # 3. Hashed Addressables fallback: if 0 slots found so far, inspect non-hint aa/*.bundle files (<= 30 MB)
+    if not slots:
+        for bf in candidates.get("aa_other_bundles", []):
+            _scan_bundle_file(bf)
 
     return list(slots.values())
 

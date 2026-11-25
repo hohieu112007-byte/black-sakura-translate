@@ -118,7 +118,7 @@ _tray_balloon_shown: bool = False
 _instance_mutex_handle: Optional[int] = None
 
 _APP_TITLE = "Black Sakura Translate"
-_APP_VERSION = "1.0.2"
+_APP_VERSION = "1.0.3"
 _GITHUB_REPO = "hohieu112007-byte/black-sakura-translate"
 _GITHUB_RELEASES_API = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
 _GITHUB_RELEASES_PAGE = f"https://github.com/{_GITHUB_REPO}/releases"
@@ -282,6 +282,7 @@ class ScanRequest(BaseModel):
     target_lang: Optional[str] = "vi"
     scope: str = "FULL_PATCH"
     translate_choices: bool = True
+    aes_key: Optional[str] = None
 
 
 class SlotRankRequest(BaseModel):
@@ -311,6 +312,7 @@ class UpdateProfileRequest(BaseModel):
     translate_choices: Optional[bool] = None
     keep_proper_nouns: Optional[bool] = None
     patch_fonts: Optional[bool] = None
+    aes_key: Optional[str] = None
 
 
 class StartTranslateRequest(BaseModel):
@@ -1339,8 +1341,9 @@ async def api_scan_game(game_id: str, req: ScanRequest):
         raise HTTPException(status_code=404, detail="Game not found")
 
     game_dir = game["game_dir"]
+    eff_aes_key = (req.aes_key if req.aes_key is not None else game.get("aes_key")) or ""
     ac_report = await asyncio.to_thread(scan_anticheat, game_dir)
-    loc_report = await asyncio.to_thread(scan_game_languages, game_dir)
+    loc_report = await asyncio.to_thread(scan_game_languages, game_dir, eff_aes_key)
     slots = loc_report.get("slots", [])
 
     src_lang = req.source_lang or game.get("source_lang") or "en"
@@ -1416,6 +1419,7 @@ async def api_scan_game(game_id: str, req: ScanRequest):
         target_lang=tgt_lang,
         inject_slot=inject_slot,
         scope=req.scope,
+        aes_key=eff_aes_key.strip(),
         total_strings=extract_stats["unique_count"],
         translated_strings=extract_stats.get("done", 0),
         progress_pct=extract_stats.get("progress_pct", 0.0),
@@ -2095,7 +2099,7 @@ async def api_apply_saved_translation(game_id: str, req: ApplySavedTranslationRe
 
     slots = game.get("detected_slots", [])
     if not slots:
-        loc_report = await asyncio.to_thread(scan_game_languages, game["game_dir"])
+        loc_report = await asyncio.to_thread(scan_game_languages, game["game_dir"], game.get("aes_key") or "")
         slots = loc_report.get("slots", [])
     slot_map = {s["slot_id"]: s for s in slots}
     if req.source_lang not in slot_map:
@@ -2256,7 +2260,7 @@ async def _hot_apply_cached_game(
 
     slots = game.get("detected_slots", [])
     if not slots:
-        loc_report = await asyncio.to_thread(scan_game_languages, game["game_dir"])
+        loc_report = await asyncio.to_thread(scan_game_languages, game["game_dir"], game.get("aes_key") or "")
         slots = loc_report.get("slots", [])
     slot_map = {s["slot_id"]: s for s in slots}
     ranked = rank_inject_slots(slots, src, tgt)
@@ -2533,7 +2537,7 @@ async def api_delta_update_game(game_id: str):
             watch["updated_files"],
         )
 
-    loc_report = await asyncio.to_thread(scan_game_languages, game["game_dir"])
+    loc_report = await asyncio.to_thread(scan_game_languages, game["game_dir"], game.get("aes_key") or "")
     slots = loc_report.get("slots", []) or game.get("detected_slots", [])
     slot_map = {s["slot_id"]: s for s in slots}
     ranked = rank_inject_slots(slots, src, tgt)

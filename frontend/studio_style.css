@@ -1944,5 +1944,46 @@ html[data-theme="obsidian"] .live-active-model-banner.role-main { color: #60a5fa
   word-break: break-word;
 }
 
+.quick-diag-box {
+  margin-top: 8px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 196, 80, 0.35);
+  background: rgba(255, 196, 80, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quick-diag-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.quick-diag-text {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink);
+  flex: 1;
+  min-width: 180px;
+}
+
+.unreal-aes-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.unreal-aes-row input {
+  flex: 1;
+  min-width: 190px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
 
 

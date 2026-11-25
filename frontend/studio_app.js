@@ -13,6 +13,7 @@ const state = {
   liveCategoryFilter: "ALL",
   liveSearchTimer: null,
   dismissedUpdateGameIds: new Set(),
+  autoRescannedIds: new Set(),
   recentRows: [],
   preset: "BALANCED",
   scope: "FULL_PATCH",
@@ -37,7 +38,7 @@ const state = {
   skills: { languages: [], styles: [] },
   skillCatalogLayer: "styles",
   editingSkill: null,
-  appVersion: "1.0.2",
+  appVersion: "1.0.3",
   autoCheckUpdates: true,
   appUpdateInfo: null,
   lastJobError: null,
@@ -1062,6 +1063,7 @@ async function renderSelectedGamePage() {
   }
 
   $("btnHeroPlay").disabled = false;
+  if ($("btnQuickRescan")) $("btnQuickRescan").disabled = Boolean(state.jobRunning);
   $("btnFixErrors").disabled = false;
   $("btnQuickRestore").disabled = !g.has_backup;
   if ($("navGameDetailBtn")) $("navGameDetailBtn").textContent = g.title || "Trang Game";
@@ -1155,6 +1157,30 @@ async function renderSelectedGamePage() {
   state.injectSlot = g.inject_slot || state.rankedSlots[0]?.slot_id || state.sourceLang;
   renderSlotGrids();
   renderGameContextCard(g);
+
+  // Contextual Diagnostic + AES Unlock Box + Auto-Rescan if empty after update
+  const diagBox = $("quickScanDiagBox");
+  const aesRow = $("unrealAesInputRow");
+  const aesInp = $("inpUnrealAesKey");
+  const methodStr = String(g.method || "");
+  const savedAes = String(g.aes_key || "").trim();
+  const isAesGame = /aes|encrypt|mã hóa/i.test(methodStr) || Boolean(savedAes) || (String(g.engine || "").toLowerCase().includes("unreal") && allSlots.length === 0);
+  if (diagBox) {
+    const showDiag = allSlots.length === 0 || Boolean(savedAes);
+    diagBox.classList.toggle("hidden", !showDiag);
+    if ($("quickDiagText")) {
+      $("quickDiagText").textContent = allSlots.length === 0
+        ? `ℹ ${methodStr || (state.uiLang === "en" ? "No localization table detected yet." : "Chưa tìm thấy bảng ngôn ngữ gốc.")}`
+        : `🔑 ${state.uiLang === "en" ? "Unlocked Unreal .pak with saved AES Key." : "Đã mở khóa .pak Unreal bằng AES Key đã lưu."}`;
+    }
+    if (aesRow) aesRow.classList.toggle("hidden", !isAesGame);
+    if (aesInp && document.activeElement !== aesInp) aesInp.value = savedAes;
+  }
+
+  if (allSlots.length === 0 && !state.autoRescannedIds.has(g.game_id) && !state.jobRunning) {
+    state.autoRescannedIds.add(g.game_id);
+    scanSelectedGame({ silent: true, aesKey: savedAes });
+  }
 
   if (g.steam_appid && !(g.game_description || "").trim() && !state.fetchedSteamContextIds.has(g.game_id)) {
     state.fetchedSteamContextIds.add(g.game_id);
@@ -2089,11 +2115,17 @@ async function rerankSlots(persist = false) {
   if (persist) flashConfigSaved();
 }
 
-async function scanSelectedGame() {
+async function scanSelectedGame(opts = {}) {
   const g = selectedGame();
   if (!g) return;
+  const isSilent = Boolean(opts && !(opts instanceof Event) && opts.silent);
+  const rescanBtns = [$("btnQuickRescan"), $("btnRescanGame"), $("btnDiagRescan"), $("btnUnlockUnrealAes")].filter(Boolean);
+  for (const b of rescanBtns) b.disabled = true;
   try {
-    showToast("Đang quét lại bảng ngôn ngữ...");
+    if (!isSilent) showToast(state.uiLang === "en" ? "Rescanning game localization..." : "Đang quét lại bảng ngôn ngữ...");
+    const aesKeyVal = (opts && !(opts instanceof Event) && opts.aesKey !== undefined)
+      ? String(opts.aesKey || "").trim()
+      : ($("inpUnrealAesKey") ? String($("inpUnrealAesKey").value || "").trim() : String(g.aes_key || "").trim());
     const res = await api(`/api/games/${g.game_id}/scan`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2102,13 +2134,23 @@ async function scanSelectedGame() {
         target_lang: state.targetLang,
         scope: state.scope,
         translate_choices: $("chkTranslateChoices").checked,
+        aes_key: aesKeyVal,
       }),
     });
     renderPresetEstimates(res.scan_stats?.estimates);
     await loadGames(g.game_id);
-    showToast("Quét hoàn tất");
+    const foundCount = res?.game?.detected_slots?.length || 0;
+    if (!isSilent) {
+      showToast(
+        foundCount > 0
+          ? (state.uiLang === "en" ? `Scan complete (${foundCount} language slots)!` : `Quét hoàn tất (${foundCount} ngôn ngữ)!`)
+          : (res?.game?.method || (state.uiLang === "en" ? "Scan complete" : "Quét hoàn tất")),
+      );
+    }
   } catch (err) {
-    showToast(err.message, "error");
+    if (!isSilent) showToast(err.message, "error");
+  } finally {
+    for (const b of rescanBtns) b.disabled = Boolean(state.jobRunning);
   }
 }
 
@@ -3170,7 +3212,16 @@ function bindEvents() {
     persistGameBasicConfig();
   });
 
-  $("btnRescanGame").addEventListener("click", scanSelectedGame);
+  $("btnRescanGame")?.addEventListener("click", () => scanSelectedGame());
+  $("btnQuickRescan")?.addEventListener("click", () => scanSelectedGame());
+  $("btnDiagRescan")?.addEventListener("click", () => scanSelectedGame());
+  $("btnUnlockUnrealAes")?.addEventListener("click", () => scanSelectedGame({ aesKey: $("inpUnrealAesKey")?.value || "" }));
+  $("inpUnrealAesKey")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      scanSelectedGame({ aesKey: $("inpUnrealAesKey")?.value || "" });
+    }
+  });
   $("selectLaunchMode").addEventListener("change", async (e) => {
     const g = selectedGame();
     if (g) await api(`/api/games/${g.game_id}/profile`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ launch_mode: e.target.value }) });

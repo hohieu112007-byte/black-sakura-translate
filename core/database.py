@@ -28,7 +28,7 @@ _ALLOWED_GAME_COLUMNS = {
     "style_skill_id", "lang_skill_override", "applied_skill_signature", "engine", "method",
     "anticheat_status", "anticheat_vendors", "anticheat_files", "detected_slots_json",
     "source_lang", "target_lang", "inject_slot", "scope",
-    "preset_level", "ai_mode", "translate_choices", "keep_proper_nouns", "patch_fonts",
+    "preset_level", "ai_mode", "translate_choices", "keep_proper_nouns", "patch_fonts", "aes_key",
     "total_strings", "translated_strings", "progress_pct", "is_patched", "last_played_at", "updated_at",
 }
 
@@ -77,6 +77,7 @@ class LibraryDB:
                     translate_choices INTEGER DEFAULT 1,
                     keep_proper_nouns INTEGER DEFAULT 1,
                     patch_fonts INTEGER DEFAULT 1,
+                    aes_key TEXT DEFAULT '',
                     game_description TEXT DEFAULT '',
                     tone_preset TEXT DEFAULT 'natural',
                     style_skill_id TEXT DEFAULT 'natural_standard',
@@ -107,6 +108,7 @@ class LibraryDB:
                 ("translate_choices", "INTEGER DEFAULT 1"),
                 ("keep_proper_nouns", "INTEGER DEFAULT 1"),
                 ("patch_fonts", "INTEGER DEFAULT 1"),
+                ("aes_key", "TEXT DEFAULT ''"),
             ):
                 if col_name not in existing_cols:
                     conn.execute(f"ALTER TABLE games ADD COLUMN {col_name} {col_def}")
@@ -133,7 +135,7 @@ class LibraryDB:
                     # Preserve user-edited/saved profile & basic configuration preferences on re-import/rescan
                     if k in (
                         "game_description", "compiled_style_card", "tone_preset",
-                        "style_skill_id", "lang_skill_override",
+                        "style_skill_id", "lang_skill_override", "aes_key",
                         "source_lang", "target_lang", "inject_slot", "scope",
                         "preset_level", "ai_mode",
                     ) and str(existing[k] or "").strip():
@@ -168,6 +170,7 @@ class LibraryDB:
                     "translate_choices": int(record.get("translate_choices", 1)),
                     "keep_proper_nouns": int(record.get("keep_proper_nouns", 1)),
                     "patch_fonts": int(record.get("patch_fonts", 1)),
+                    "aes_key": record.get("aes_key", ""),
                     "game_description": record.get("game_description", ""),
                     "tone_preset": record.get("tone_preset") or "natural",
                     "style_skill_id": record.get("style_skill_id") or record.get("tone_preset") or "natural_standard",

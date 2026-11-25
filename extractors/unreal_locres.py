@@ -276,7 +276,21 @@ def _run_tool(cmd: List[str], cwd: Optional[Path] = None) -> subprocess.Complete
     )
 
 
-def _read_pak_file_bytes(pak_path: Path, internal_rel: str) -> Optional[bytes]:
+def _normalize_aes_key(aes_key: Optional[str]) -> str:
+    k = (aes_key or "").strip()
+    if k.lower().startswith("0x"):
+        k = k[2:].strip()
+    return k
+
+
+def _repak_cmd(args: List[str], aes_key: Optional[str] = None) -> List[str]:
+    clean_key = _normalize_aes_key(aes_key)
+    if clean_key:
+        return [str(DEFAULT_REPAK), "-a", clean_key, *args]
+    return [str(DEFAULT_REPAK), *args]
+
+
+def _read_pak_file_bytes(pak_path: Path, internal_rel: str, aes_key: Optional[str] = None) -> Optional[bytes]:
     """Read a single file from an Unreal .pak via `repak get` with `repak unpack -f -i` fallback."""
     if not DEFAULT_REPAK.exists() or not pak_path.exists():
         return None
@@ -286,10 +300,10 @@ def _read_pak_file_bytes(pak_path: Path, internal_rel: str) -> Optional[bytes]:
     if not rel:
         return None
 
-    # 1. Primary: `repak get <pak> <internal_path>` directly to stdout (binary mode)
+    # 1. Primary: `repak [-a KEY] get <pak> <internal_path>` directly to stdout (binary mode)
     try:
         proc = subprocess.run(
-            [str(DEFAULT_REPAK), "get", str(pak_path), rel],
+            _repak_cmd(["get", str(pak_path), rel], aes_key=aes_key),
             capture_output=True,
             timeout=60,
             **hidden_subprocess_kwargs(),
@@ -299,11 +313,11 @@ def _read_pak_file_bytes(pak_path: Path, internal_rel: str) -> Optional[bytes]:
     except Exception as exc:
         logger.debug("repak get failed on %s (%s): %s", pak_path.name, rel, exc)
 
-    # 2. Fallback: `repak unpack -f -i <pattern> -o <out_dir> <pak>`
+    # 2. Fallback: `repak [-a KEY] unpack -f -i <pattern> -o <out_dir> <pak>`
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             out_dir = Path(tmpdir)
-            _run_tool([str(DEFAULT_REPAK), "unpack", "-f", "-i", rel, "-o", str(out_dir), str(pak_path)])
+            _run_tool(_repak_cmd(["unpack", "-f", "-i", rel, "-o", str(out_dir), str(pak_path)], aes_key=aes_key))
             candidate = out_dir / rel
             if not candidate.exists():
                 matches = list(out_dir.rglob(Path(rel).name))
@@ -315,12 +329,12 @@ def _read_pak_file_bytes(pak_path: Path, internal_rel: str) -> Optional[bytes]:
     return None
 
 
-def _detect_pak_version(pak_path: Path) -> Optional[str]:
+def _detect_pak_version(pak_path: Path, aes_key: Optional[str] = None) -> Optional[str]:
     """Inspect .pak header version via `repak info` so mod paks match the target engine version."""
     if not DEFAULT_REPAK.exists() or not pak_path.exists():
         return None
     try:
-        proc = _run_tool([str(DEFAULT_REPAK), "info", str(pak_path)])
+        proc = _run_tool(_repak_cmd(["info", str(pak_path)], aes_key=aes_key))
         if proc.returncode == 0:
             m = re.search(r"\b(V\d+[AB]?)\b", proc.stdout or "")
             if m:
@@ -330,7 +344,7 @@ def _detect_pak_version(pak_path: Path) -> Optional[str]:
     return None
 
 
-def diagnose_unreal_empty_scan(game_dir: str | Path) -> Optional[str]:
+def diagnose_unreal_empty_scan(game_dir: str | Path, aes_key: Optional[str] = None) -> Optional[str]:
     """Return a clear Vietnamese explanation when an Unreal game has 0 readable .locres slots."""
     root = Path(game_dir)
     utocs = list(root.rglob("*.utoc"))
@@ -340,10 +354,11 @@ def diagnose_unreal_empty_scan(game_dir: str | Path) -> Optional[str]:
     if paks and not DEFAULT_REPAK.exists():
         return "Unreal Engine (chưa tải công cụ repak.exe — mở Cài đặt nâng cao để tải Tools)"
     if paks and DEFAULT_REPAK.exists():
+        clean_key = _normalize_aes_key(aes_key)
         aes_blocked = False
         for pak in paks[:4]:
             try:
-                proc = _run_tool([str(DEFAULT_REPAK), "list", str(pak)])
+                proc = _run_tool(_repak_cmd(["list", str(pak)], aes_key=clean_key))
                 err = (proc.stderr or "") + "\n" + (proc.stdout or "")
                 if proc.returncode != 0 and any(tok in err.lower() for tok in ("aes", "encrypt", "key")):
                     aes_blocked = True
@@ -351,16 +366,19 @@ def diagnose_unreal_empty_scan(game_dir: str | Path) -> Optional[str]:
             except Exception:
                 pass
         if aes_blocked:
-            return "Unreal Engine (.pak được mã hóa AES — chưa hỗ trợ giải mã tự động)"
+            if clean_key:
+                return "Unreal Engine (AES Key vừa nhập không khớp với file .pak)"
+            return "Unreal Engine (.pak được mã hóa AES — nhập AES Key bên dưới để giải mã)"
         if utocs:
             return "Unreal Engine (dữ liệu đóng gói UE5 IoStore .utoc/.ucas — chưa có file .locres rời hoặc trong .pak)"
     return None
 
 
-def scan_unreal_localization(game_dir: str | Path) -> List[Dict[str, Any]]:
+def scan_unreal_localization(game_dir: str | Path, aes_key: Optional[str] = None) -> List[Dict[str, Any]]:
     """Scan loose Content/Localization/*/<lang>/*.locres OR Unreal .pak indexes via repak.exe."""
     root = Path(game_dir)
     slots: Dict[str, Dict[str, Any]] = {}
+    clean_key = _normalize_aes_key(aes_key)
 
     # 1. Loose Content/Localization/**/<lang>/*.locres
     for locres_path in root.rglob("*.locres"):
@@ -395,7 +413,7 @@ def scan_unreal_localization(game_dir: str | Path) -> List[Dict[str, Any]]:
             if pak.parent.name.lower() == "~mods":
                 continue
             try:
-                proc = _run_tool([str(DEFAULT_REPAK), "list", str(pak)])
+                proc = _run_tool(_repak_cmd(["list", str(pak)], aes_key=clean_key))
                 if proc.returncode != 0:
                     continue
                 for line in proc.stdout.splitlines():
@@ -415,6 +433,8 @@ def scan_unreal_localization(game_dir: str | Path) -> List[Dict[str, Any]]:
                                 "count": 0,
                             },
                         )
+                        if clean_key:
+                            slot["aes_key"] = clean_key
                         slot["pak_entries"].append({"pak_path": str(pak), "internal_path": rel})
             except Exception as exc:
                 logger.debug("repak list failed on %s: %s", pak, exc)
@@ -427,7 +447,7 @@ def scan_unreal_localization(game_dir: str | Path) -> List[Dict[str, Any]]:
             if len(pak_entries) <= 15:
                 real_count = 0
                 for item in pak_entries:
-                    raw = _read_pak_file_bytes(Path(item["pak_path"]), item["internal_path"])
+                    raw = _read_pak_file_bytes(Path(item["pak_path"]), item["internal_path"], aes_key=clean_key)
                     if not raw:
                         continue
                     try:
@@ -542,11 +562,12 @@ def extract_unreal_slot_entries(game_dir: str | Path, slot_info: Dict[str, Any])
 
     # Extract pak_entries directly via repak get / unpack -f -i
     pak_entries = slot_info.get("pak_entries", [])
+    aes_key = slot_info.get("aes_key", "")
     if pak_entries and DEFAULT_REPAK.exists():
         for item in pak_entries:
             pak_path = Path(item["pak_path"])
             rel = item["internal_path"].lstrip("/")
-            raw = _read_pak_file_bytes(pak_path, rel)
+            raw = _read_pak_file_bytes(pak_path, rel, aes_key=aes_key)
             if raw:
                 _consume_locres_bytes(raw, Path(rel).name, origin_pak=str(pak_path), internal_rel=rel)
 
@@ -590,6 +611,7 @@ def apply_unreal_translations(
 
     # Case 2: Pak-based Unreal localization -> emit clean mod pak Content/Paks/~mods/pakchunk99-SakugaLoc_P.pak
     pak_entries = inject_slot_info.get("pak_entries", [])
+    aes_key = inject_slot_info.get("aes_key", "")
     if pak_entries and DEFAULT_REPAK.exists():
         # Find Paks dir
         paks_dirs = [p for p in root.rglob("Paks") if p.is_dir()]
@@ -605,14 +627,14 @@ def apply_unreal_translations(
             if backup_cb:
                 backup_cb([], [str(mod_pak_path)])
 
-        pak_ver = _detect_pak_version(Path(pak_entries[0]["pak_path"]))
+        pak_ver = _detect_pak_version(Path(pak_entries[0]["pak_path"]), aes_key=aes_key)
         with tempfile.TemporaryDirectory() as tmpdir:
             stage_root = Path(tmpdir) / "pak_stage"
             stage_root.mkdir(parents=True, exist_ok=True)
             for item in pak_entries:
                 pak_path = Path(item["pak_path"])
                 rel = item["internal_path"].lstrip("/")
-                raw_src = _read_pak_file_bytes(pak_path, rel)
+                raw_src = _read_pak_file_bytes(pak_path, rel, aes_key=aes_key)
                 if not raw_src:
                     continue
                 parsed = parse_locres_bytes_python(raw_src)

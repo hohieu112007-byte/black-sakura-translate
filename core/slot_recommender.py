@@ -52,6 +52,7 @@ def rank_inject_slots(
     tgt_is_vi = tgt_low == "vi"
     tgt_is_fr = tgt_low == "fr" or tgt_low.startswith("fr-")
     tgt_is_latin = tgt in LATIN_SLOTS or tgt_low.split("-")[0] in ("fr", "es", "de", "pt", "pl", "it", "vi", "en")
+    only_one_slot = len(detected_slots) == 1
     ranked: List[Dict[str, Any]] = []
 
     for slot in detected_slots:
@@ -66,10 +67,16 @@ def rank_inject_slots(
             if sid_low == "vi":
                 prio, rec, badge, note, howto = VI_PRIORITY_SPECS["vi"]
             elif is_source_slot:
-                prio = 20
-                rec = False
-                badge = "GHI ĐÈ GỐC"
-                note = f"Ghi đè trực tiếp lên ngôn ngữ nguồn ({label}) — không phải slot dự phòng"
+                if only_one_slot:
+                    prio = 0
+                    rec = True
+                    badge = "★ GHI ĐÈ DUY NHẤT"
+                    note = f"★ ĐỀ XUẤT • Game chỉ có 1 ngôn ngữ ({label}) — tự chọn ghi đè trực tiếp (có Backup gốc)"
+                else:
+                    prio = 20
+                    rec = False
+                    badge = "GHI ĐÈ GỐC"
+                    note = f"Ghi đè trực tiếp lên ngôn ngữ nguồn ({label}) — không phải slot dự phòng"
                 howto = f"Vào game dùng ngay ngôn ngữ mặc định ({label})"
             elif sid in VI_PRIORITY_SPECS:
                 prio, rec, badge, note, howto = VI_PRIORITY_SPECS[sid]
@@ -115,9 +122,17 @@ def rank_inject_slots(
                 note = f"★ ĐỀ XUẤT • Slot Latinh dự phòng an toàn, giữ nguyên {src.upper()}"
                 howto = f"Settings game ➔ Language ➔ {label}"
             elif is_source_slot:
-                prio = 20
-                rec = False
-                badge = "GHI ĐÈ GỐC"
+                if only_one_slot:
+                    prio = 0
+                    rec = True
+                    badge = "★ GHI ĐÈ DUY NHẤT"
+                    note = f"★ ĐỀ XUẤT • Game chỉ có 1 ngôn ngữ ({label}) — tự chọn ghi đè trực tiếp (có Backup gốc)"
+                else:
+                    prio = 20
+                    rec = False
+                    badge = "GHI ĐÈ GỐC"
+                    note = f"Ghi đè trực tiếp lên ngôn ngữ nguồn ({label})"
+                howto = f"Vào game dùng ngay ngôn ngữ mặc định ({label})"
                 note = f"Ghi đè trực tiếp lên ngôn ngữ nguồn ({label})"
                 howto = f"Vào game dùng ngay ngôn ngữ mặc định ({label})"
             else:

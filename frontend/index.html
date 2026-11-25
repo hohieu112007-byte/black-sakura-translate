@@ -185,6 +185,7 @@
             </div>
           </div>
           <div class="action-strip-right">
+            <button id="btnQuickRescan" type="button" class="btn btn-outline btn-sm" title="Quét lại ngôn ngữ gốc &amp; file trong thư mục game" data-i18n="btn_rescan">↻ Quét lại game</button>
             <button id="btnFixErrors" class="btn btn-warn-outline btn-sm" title="Dọn &lt;think&gt;, sửa thẻ tag hỏng, dịch lại câu lỗi, đồng bộ catalog.bin &amp; chống đen màn hình Steam" data-i18n="btn_fix_errors">🛠 Fix lỗi</button>
             <button id="btnQuickRestore" class="btn btn-ghost btn-sm" title="Khôi phục 100% file gốc" data-i18n="btn_restore">↺ Khôi phục gốc</button>
           </div>
@@ -310,6 +311,18 @@
                 <!-- Inline Quick Slot Picker (Hidden unless user clicks "Đổi") -->
                 <div id="inlineSlotCollapse" class="inline-collapse hidden">
                   <div id="slotCardsGridQuick" class="slot-cards-grid"></div>
+                </div>
+
+                <!-- Contextual Diagnostic + Unreal AES Key Box (auto-shown when 0 slots or AES set) -->
+                <div id="quickScanDiagBox" class="quick-diag-box hidden">
+                  <div class="quick-diag-top">
+                    <span id="quickDiagText" class="quick-diag-text"></span>
+                    <button id="btnDiagRescan" type="button" class="btn btn-ghost btn-sm" data-i18n="btn_rescan">↻ Quét lại game</button>
+                  </div>
+                  <div id="unrealAesInputRow" class="unreal-aes-row hidden">
+                    <input id="inpUnrealAesKey" type="text" class="select-full" placeholder="Nhập AES Key (.pak Unreal dạng Hex 64 ký tự hoặc Base64)..." autocomplete="off" spellcheck="false" />
+                    <button id="btnUnlockUnrealAes" type="button" class="btn btn-primary btn-sm" data-i18n="btn_unlock_aes">🔑 Giải mã &amp; Quét lại</button>
+                  </div>
                 </div>
               </div>
 
@@ -715,10 +728,10 @@
             <div class="card-header">
               <div>
                 <h2 data-i18n="app_update_card_title">Cập nhật Ứng dụng (GitHub Releases)</h2>
-                <p id="appUpdateStatusText" class="mono-sub" data-i18n="app_update_status_idle">Phiên bản hiện tại: v1.0.2</p>
+                <p id="appUpdateStatusText" class="mono-sub" data-i18n="app_update_status_idle">Phiên bản hiện tại: v1.0.3</p>
               </div>
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <span id="appVersionBadge" class="badge">v1.0.2</span>
+                <span id="appVersionBadge" class="badge">v1.0.3</span>
                 <button id="btnCheckAppUpdate" type="button" class="btn btn-outline btn-sm" data-i18n="btn_check_update">↻ Kiểm tra bản mới</button>
                 <button id="btnOpenUpdateModal" type="button" class="btn btn-primary btn-sm hidden" data-i18n="btn_view_update">⬆ Xem bản mới</button>
               </div>
@@ -1005,9 +1018,9 @@
       </div>
       <div class="modal-body">
         <div class="app-update-ver-row">
-          <span class="badge" id="lblUpdateCurrentVer">v1.0.2</span>
+          <span class="badge" id="lblUpdateCurrentVer">v1.0.3</span>
           <span>➔</span>
-          <span class="badge badge-safe" id="lblUpdateLatestVer">v1.0.2</span>
+          <span class="badge badge-safe" id="lblUpdateLatestVer">v1.0.3</span>
           <span id="lblUpdateReleaseDate" class="mono-mini"></span>
         </div>
         <div id="lblUpdateAssetMeta" class="mono-mini" style="opacity:0.85;"></div>

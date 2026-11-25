@@ -56,7 +56,7 @@ EXTERNAL_LOC_DIRS = {
 
 EXTERNAL_EXTS = {
     ".json", ".csv", ".tsv", ".po", ".pot", ".xml", ".yaml", ".yml",
-    ".ini", ".txt", ".rpy", ".loc", ".lang", ".strings",
+    ".ini", ".txt", ".rpy", ".loc", ".lang", ".strings", ".bytes",
 }
 MULTI_COL_NON_LANG_HEADERS = {
     "key", "id", "string_id", "comment", "notes", "note", "context", "description", "category", "speaker", "character",
@@ -236,9 +236,16 @@ def _scan_external_files(game_dir: Path, engine: str) -> List[Dict[str, Any]]:
             except OSError:
                 continue
 
-            # Ignore random .txt/.ini/.xml/.loc/.lang/.strings at top level unless inside a loc folder or clearly loc-related
-            if ext in (".txt", ".ini", ".xml", ".loc", ".lang", ".strings") and not in_loc_folder:
+            # Ignore random .txt/.ini/.xml/.loc/.lang/.strings/.bytes unless inside a loc folder or clearly loc-related
+            if ext in (".txt", ".ini", ".xml", ".loc", ".lang", ".strings", ".bytes") and not in_loc_folder:
                 if not any(h in fname.lower() for h in ("lang", "loc", "text", "string", "i18n", "sub", "dialog")):
+                    continue
+            if ext == ".bytes":
+                try:
+                    head = fpath.read_bytes()[:1024]
+                    if b"\x00" in head:
+                        continue
+                except OSError:
                     continue
 
             if ext in (".csv", ".tsv"):
@@ -306,8 +313,8 @@ def _scan_external_files(game_dir: Path, engine: str) -> List[Dict[str, Any]]:
                 continue
 
             lang_code = _guess_lang_from_path(fpath, game_dir)
-            if not lang_code and in_loc_folder and ext in (".json", ".po", ".xml", ".yaml", ".yml", ".loc", ".lang", ".strings"):
-                # Single-file localization file without explicit lang tag -> treat as 'en' default
+            if not lang_code and (in_loc_folder or any(h in fname.lower() for h in ("lang", "loc", "string", "dialog", "sub"))) and ext in (".json", ".po", ".xml", ".yaml", ".yml", ".loc", ".lang", ".strings", ".csv", ".tsv", ".txt", ".bytes"):
+                # Single-file localization file without explicit lang tag (e.g. only English) -> default to 'en'
                 lang_code = "en"
             if lang_code:
                 slot = slots.setdefault(
@@ -326,7 +333,7 @@ def _scan_external_files(game_dir: Path, engine: str) -> List[Dict[str, Any]]:
     return list(slots.values())
 
 
-def scan_game_languages(game_dir: str | Path) -> Dict[str, Any]:
+def scan_game_languages(game_dir: str | Path, aes_key: Optional[str] = None) -> Dict[str, Any]:
     """Unified <1s scanner returning all detected language slots & native method."""
     root = Path(game_dir)
     if not root.exists():
@@ -359,12 +366,14 @@ def scan_game_languages(game_dir: str | Path) -> Dict[str, Any]:
                     cur.setdefault("text_assets", []).extend(s["text_assets"])
                 if s.get("raw_binary"):
                     cur["raw_binary"] = True
+                if s.get("aes_key"):
+                    cur["aes_key"] = s["aes_key"]
 
     # Run native hunters according to detected engine first, plus external files
     if "unity" in engine.lower():
         _merge(scan_unity_loc_tables(root))
     if "unreal" in engine.lower() or any(root.rglob("*.locres")):
-        _merge(scan_unreal_localization(root))
+        _merge(scan_unreal_localization(root, aes_key=aes_key))
     if "ren'py" in engine.lower():
         _merge(_scan_rpa_tl_archives(root))
 
@@ -379,7 +388,7 @@ def scan_game_languages(game_dir: str | Path) -> Dict[str, Any]:
         if "unity" in engine.lower():
             diag = diagnose_unity_empty_scan(root)
         elif "unreal" in engine.lower():
-            diag = diagnose_unreal_empty_scan(root)
+            diag = diagnose_unreal_empty_scan(root, aes_key=aes_key)
         method_label = diag or "Không tìm thấy bảng ngôn ngữ gốc"
 
     return {
@@ -539,7 +548,18 @@ def extract_slot_entries(
 
         enc_info = detect_encoding_and_eol(p.read_bytes())
         text = enc_info["text"]
-        effective_ext = ".json" if ext in (".loc", ".lang", ".strings") and text.lstrip().startswith("{") else ext
+        if ext in (".loc", ".lang", ".strings", ".bytes"):
+            trimmed = text.lstrip()
+            if trimmed.startswith("{") or trimmed.startswith("["):
+                effective_ext = ".json"
+            elif trimmed.startswith("<"):
+                effective_ext = ".xml"
+            elif sniff_csv_headers_from_text(text) is not None:
+                effective_ext = ".csv"
+            else:
+                effective_ext = ext
+        else:
+            effective_ext = ext
 
         if effective_ext == ".json":
             data = json.loads(text)
@@ -617,7 +637,7 @@ def extract_slot_entries(
                             location_meta={"xml_idx": idx, "tag": elem.tag, "key": k},
                         )
                     )
-        elif effective_ext in (".ini", ".txt", ".loc", ".lang", ".strings"):
+        elif effective_ext in (".ini", ".txt", ".loc", ".lang", ".strings", ".bytes"):
             for l_i, line in enumerate(text.splitlines()):
                 sep = "=" if "=" in line else ("\t" if "\t" in line else None)
                 if not sep or line.lstrip().startswith(("#", ";", "[")):
@@ -710,7 +730,18 @@ def apply_slot_translations(
 
         enc = detect_encoding_and_eol(tf.read_bytes())
         text = enc["text"]
-        effective_ext = ".json" if ext in (".loc", ".lang", ".strings") and text.lstrip().startswith("{") else ext
+        if ext in (".loc", ".lang", ".strings", ".bytes"):
+            trimmed = text.lstrip()
+            if trimmed.startswith("{") or trimmed.startswith("["):
+                effective_ext = ".json"
+            elif trimmed.startswith("<"):
+                effective_ext = ".xml"
+            elif sniff_csv_headers_from_text(text) is not None:
+                effective_ext = ".csv"
+            else:
+                effective_ext = ext
+        else:
+            effective_ext = ext
 
         if effective_ext == ".json":
             data = json.loads(text)
@@ -772,7 +803,7 @@ def apply_slot_translations(
             xml_bytes = ET.tostring(tree.getroot(), encoding="unicode")
             write_preserving_encoding(tf, xml_bytes, enc["encoding"], enc["bom"], enc["newline"])
 
-        elif effective_ext in (".ini", ".txt", ".loc", ".lang", ".strings"):
+        elif effective_ext in (".ini", ".txt", ".loc", ".lang", ".strings", ".bytes"):
             out_lines = []
             for line in text.splitlines():
                 sep = "=" if "=" in line else ("\t" if "\t" in line else None)
