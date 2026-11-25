@@ -37,7 +37,7 @@ const state = {
   skills: { languages: [], styles: [] },
   skillCatalogLayer: "styles",
   editingSkill: null,
-  appVersion: "1.0.1",
+  appVersion: "1.0.2",
   autoCheckUpdates: true,
   appUpdateInfo: null,
   lastJobError: null,

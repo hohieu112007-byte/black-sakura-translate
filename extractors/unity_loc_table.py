@@ -1,8 +1,9 @@
-"""Unity Native Localization Extractor & Writer (StringTable / I2Languages + Addressables catalog.bin sync)."""
+"""Unity Native Localization Extractor & Writer (StringTable / I2Languages / TextAsset + Binary IL2CPP Fallback + Addressables sync)."""
 
 from __future__ import annotations
 
 import base64
+import csv
 import gc
 import io
 import json
@@ -10,10 +11,13 @@ import logging
 import os
 import re
 import struct
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import polib
 import UnityPy
+from UnityPy.files import BundleFile
 
 from core.atomic_io import atomic_write_bytes, atomic_write_text
 from extractors.subtitle_filter import LocEntry, classify_entry_category, is_translatable_string
@@ -28,13 +32,36 @@ UNITY_LOC_FILE_PATTERNS = (
     "*language*.bundle",
 )
 
+_AA_EXTRA_HINT_TOKENS = (
+    "i2",
+    "text",
+    "string",
+    "dialog",
+    "sub",
+    "table",
+    "defaultlocalgroup",
+    "shared",
+    "ui",
+    "menu",
+    "common",
+    "data",
+)
+
+_NON_AA_BUNDLE_EXTS = {".bundle", ".unity3d", ".ab", ".assetbundle"}
+_BUNDLE_MAGICS = (b"UnityFS", b"UnityRaw", b"UnityWeb")
+
 LANG_NAME_TO_CODE = {
     "english": "en",
+    "englishus": "en",
+    "englishuk": "en",
+    "englishgb": "en",
     "vietnamese": "vi",
     "tiengviet": "vi",
     "french": "fr",
+    "frenchcanada": "fr",
     "francais": "fr",
     "spanish": "es",
+    "spanishlatinamerica": "es",
     "espanol": "es",
     "german": "de",
     "deutsch": "de",
@@ -43,7 +70,9 @@ LANG_NAME_TO_CODE = {
     "portuguese": "pt",
     "portugues": "pt",
     "portuguesebrazil": "pt-BR",
+    "portuguesdobrasil": "pt-BR",
     "brazilian": "pt-BR",
+    "ptbr": "pt-BR",
     "italian": "it",
     "italiano": "it",
     "japanese": "ja",
@@ -53,33 +82,82 @@ LANG_NAME_TO_CODE = {
     "ukrainian": "uk",
     "swedish": "sv",
     "dutch": "nl",
+    "indonesian": "id",
+    "thai": "th",
+    "arabic": "ar",
+    "czech": "cs",
+    "danish": "da",
+    "finnish": "fi",
+    "norwegian": "nb",
+    "hungarian": "hu",
+    "romanian": "ro",
+    "greek": "el",
     "chinese": "zh",
     "schinese": "zh",
     "tchinese": "zh-TW",
     "simplifiedchinese": "zh",
+    "chinesesimplified": "zh",
     "traditionalchinese": "zh-TW",
+    "chinesetraditional": "zh-TW",
+    "zhtw": "zh-TW",
+    "zhcn": "zh",
 }
 
+NATIVE_AUTONYM_TO_CODE = {
+    "english": "en",
+    "tiếng việt": "vi",
+    "français": "fr",
+    "francais": "fr",
+    "deutsch": "de",
+    "español": "es",
+    "espanol": "es",
+    "italiano": "it",
+    "polski": "pl",
+    "português": "pt",
+    "português (brasil)": "pt-BR",
+    "português do brasil": "pt-BR",
+    "日本語": "ja",
+    "한국어": "ko",
+    "简体中文": "zh",
+    "中文": "zh",
+    "繁體中文": "zh-TW",
+    "русский": "ru",
+    "türkçe": "tr",
+    "українська": "uk",
+    "nederlands": "nl",
+    "svenska": "sv",
+    "bahasa indonesia": "id",
+    "ไทย": "th",
+    "العربية": "ar",
+    "čeština": "cs",
+    "dansk": "da",
+    "suomi": "fi",
+    "norsk": "nb",
+    "magyar": "hu",
+    "română": "ro",
+    "ελληνικά": "el",
+}
 
-def normalize_lang_token(raw: str) -> str:
-    if not raw:
-        return "unknown"
-    s = raw.strip()
-    paren = re.search(r"\(([a-zA-Z]{2,3}(?:[-_][a-zA-Z0-9]{2,4})?)\)", s)
-    if paren:
-        return _canon_code(paren.group(1))
-    # Remove suffixes like _assets_all
-    cleaned = re.sub(r"(localization|string[-_]?tables?|language|source|assets|all)", "", s, flags=re.IGNORECASE)
-    cleaned_alpha = re.sub(r"[^a-zA-Z0-9_-]", "", cleaned).strip("_-")
-    if len(cleaned_alpha) in (2, 3) and cleaned_alpha.isalpha():
-        return _canon_code(cleaned_alpha)
-    low_compact = re.sub(r"[^a-z]", "", s.lower())
-    for k, v in LANG_NAME_TO_CODE.items():
-        if k in low_compact:
-            return v
-    if re.match(r"^[a-zA-Z]{2}(?:[-_][A-Za-z0-9]{2,4})?$", s):
-        return _canon_code(s)
-    return s.lower()
+KNOWN_LANG_CODES = frozenset(
+    {
+        "en", "vi", "fr", "es", "de", "pl", "pt", "pt-BR", "it",
+        "ja", "ko", "ru", "zh", "zh-TW", "tr", "uk", "sv", "nl",
+        "id", "th", "ar", "cs", "da", "fi", "nb", "hu", "ro", "el",
+    }
+)
+
+_CSV_NON_LANG_HEADERS = frozenset(
+    {
+        "key", "id", "string_id", "comment", "notes", "note", "context",
+        "description", "category", "speaker", "character", "type", "desc",
+        "group", "tag", "tags", "section", "file", "index", "no", "num",
+        "version", "status", "max_length", "limit",
+    }
+)
+
+
+def is_known_lang_code(code: str) -> bool:
+    return code in KNOWN_LANG_CODES
 
 
 def _canon_code(code: str) -> str:
@@ -87,44 +165,208 @@ def _canon_code(code: str) -> str:
     low = c.lower()
     if low in ("pt-br", "ptbr"):
         return "pt-BR"
-    if low in ("zh-tw", "zhtw", "zh-hant"):
+    if low in ("zh-tw", "zhtw", "zh-hant", "zh-hk"):
         return "zh-TW"
     if low in ("zh-cn", "zhcn", "zh-hans"):
         return "zh"
+    if low in ("eng",):
+        return "en"
+    if low in ("fre", "fra"):
+        return "fr"
+    if low in ("ger", "deu"):
+        return "de"
+    if low in ("spa",):
+        return "es"
+    if low in ("ita",):
+        return "it"
+    if low in ("pol",):
+        return "pl"
+    if low in ("por",):
+        return "pt"
+    if low in ("rus",):
+        return "ru"
+    if low in ("jpn", "jp"):
+        return "ja"
+    if low in ("kor",):
+        return "ko"
+    if low in ("vie", "vn"):
+        return "vi"
+    if low in ("tur",):
+        return "tr"
+    if low in ("ukr",):
+        return "uk"
+    if low in ("swe",):
+        return "sv"
+    if low in ("nld",):
+        return "nl"
     if len(low) > 2 and "-" in low:
         return low.split("-")[0]
     return low
 
 
-def find_unity_loc_candidates(game_dir: Path) -> Dict[str, List[Path]]:
-    """Locate ONLY native localization bundles / resources.assets / I2 assets without touching level*.assets."""
-    aa_bundles: List[Path] = []
-    resource_assets: List[Path] = []
+def normalize_lang_token(raw: str) -> str:
+    if not raw:
+        return "unknown"
+    s = raw.strip()
+    low_s = s.lower()
+    if low_s in NATIVE_AUTONYM_TO_CODE:
+        return NATIVE_AUTONYM_TO_CODE[low_s]
 
-    data_dirs = [p for p in game_dir.iterdir() if p.is_dir() and p.name.endswith("_Data")]
+    bracket = re.search(
+        r"[\(\[]([a-zA-Z]{2,3}(?:[-_][a-zA-Z0-9]{2,4})?|ptbr|zhtw|zhcn)[\)\]]",
+        s,
+        re.IGNORECASE,
+    )
+    if bracket:
+        cand = _canon_code(bracket.group(1))
+        if is_known_lang_code(cand):
+            return cand
+
+    # Compact name match before aggressive stripping (captures "Chinese (Simplified)", "English (US)", etc.)
+    low_compact_full = re.sub(r"[^a-z]", "", low_s)
+    for k in sorted(LANG_NAME_TO_CODE, key=len, reverse=True):
+        if k in low_compact_full:
+            return LANG_NAME_TO_CODE[k]
+
+    # Remove suffixes like _assets_all
+    cleaned = re.sub(r"(localization|string[-_]?tables?|language|source|assets|all)", "", s, flags=re.IGNORECASE)
+    cleaned_alpha = re.sub(r"[^a-zA-Z0-9_-]", "", cleaned).strip("_-")
+    if len(cleaned_alpha) in (2, 3) and cleaned_alpha.isalpha():
+        return _canon_code(cleaned_alpha)
+    low_compact = re.sub(r"[^a-z]", "", cleaned.lower())
+    for k in sorted(LANG_NAME_TO_CODE, key=len, reverse=True):
+        if k in low_compact:
+            return LANG_NAME_TO_CODE[k]
+    if re.match(r"^[a-zA-Z]{2}(?:[-_][A-Za-z0-9]{2,4})?$", s):
+        return _canon_code(s)
+    return low_s
+
+
+def sniff_csv_headers_from_text(text: str, default_delim: str = ",") -> Optional[Tuple[str, List[str]]]:
+    """Detect delimiter and >= 2 valid language columns in CSV/TSV text."""
+    delims = ["\t", ",", ";"] if default_delim == "\t" else [default_delim, "," if default_delim != "," else ";", ";", "\t"]
+    seen_delims: List[str] = []
+    for d in delims:
+        if d not in seen_delims:
+            seen_delims.append(d)
+
+    for delim in seen_delims:
+        try:
+            reader = csv.reader(io.StringIO(text[:32768]), delimiter=delim)
+            header = next(reader, None)
+        except Exception:
+            continue
+        if not header or len(header) < 2:
+            continue
+        lang_cols: List[str] = []
+        for col in header:
+            raw_col = col.strip()
+            if not raw_col:
+                continue
+            c_clean = raw_col.lower().replace("_", "-")
+            if c_clean in _CSV_NON_LANG_HEADERS:
+                continue
+            norm = normalize_lang_token(raw_col)
+            if is_known_lang_code(norm):
+                lang_cols.append(raw_col)
+        if len(lang_cols) >= 2:
+            return delim, lang_cols
+    return None
+
+
+def _has_bundle_magic(path: Path) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+        return any(head.startswith(m) for m in _BUNDLE_MAGICS)
+    except OSError:
+        return False
+
+
+def _sharedassets_sort_key(path: Path) -> Tuple[int, str]:
+    m = re.search(r"sharedassets(\d+)\.assets$", path.name, re.IGNORECASE)
+    return (int(m.group(1)) if m else 999999, path.name.lower())
+
+
+def find_unity_loc_candidates(game_dir: Path) -> Dict[str, List[Path]]:
+    """Locate native localization bundles (Addressables & StreamingAssets), resources.assets, and sharedassets*.assets."""
+    bundles: List[Path] = []
+    resource_assets: List[Path] = []
+    data_dirs = sorted([p for p in game_dir.iterdir() if p.is_dir() and p.name.endswith("_Data")])
+
+    seen_bundles: set[Path] = set()
     for dd in data_dirs:
-        aa_dir = dd / "StreamingAssets" / "aa"
+        sa_dir = dd / "StreamingAssets"
+        aa_dir = sa_dir / "aa"
+
+        # 1. Addressables bundles under StreamingAssets/aa/**
         if aa_dir.exists():
-            seen: set[Path] = set()
             for pattern in UNITY_LOC_FILE_PATTERNS:
                 for bf in aa_dir.rglob(pattern):
-                    if bf.is_file() and bf not in seen:
-                        seen.add(bf)
-                        aa_bundles.append(bf)
-            # Also accept any bundle whose filename contains common locale markers like (en), (fr), _en_
+                    if bf.is_file() and bf not in seen_bundles:
+                        seen_bundles.add(bf)
+                        bundles.append(bf)
             for bf in aa_dir.rglob("*.bundle"):
-                if bf in seen or not bf.is_file():
+                if bf in seen_bundles or not bf.is_file():
                     continue
                 low = bf.name.lower()
-                if "loc" in low or "lang" in low or "i18n" in low or re.search(r"\([a-z]{2}(?:-[a-z]{2})?\)", low):
-                    seen.add(bf)
-                    aa_bundles.append(bf)
+                is_strong = "loc" in low or "lang" in low or "i18n" in low or re.search(r"\([a-z]{2}(?:-[a-z]{2})?\)", low)
+                if is_strong:
+                    seen_bundles.add(bf)
+                    bundles.append(bf)
+                elif any(tok in low for tok in _AA_EXTRA_HINT_TOKENS):
+                    try:
+                        if bf.stat().st_size <= 25 * 1024 * 1024:
+                            seen_bundles.add(bf)
+                            bundles.append(bf)
+                    except OSError:
+                        pass
 
+        # 2. Non-Addressables AssetBundles anywhere inside StreamingAssets/**
+        if sa_dir.exists():
+            for bf in sa_dir.rglob("*"):
+                if not bf.is_file() or bf in seen_bundles:
+                    continue
+                if aa_dir in bf.parents:
+                    continue
+                ext = bf.suffix.lower()
+                try:
+                    sz = bf.stat().st_size
+                except OSError:
+                    continue
+                if sz < 128 or sz > 100 * 1024 * 1024:
+                    continue
+                if ext in _NON_AA_BUNDLE_EXTS:
+                    seen_bundles.add(bf)
+                    bundles.append(bf)
+                elif not ext:
+                    rel_low = str(bf.relative_to(sa_dir)).lower()
+                    if any(tok in rel_low for tok in ("loc", "lang", "i2", "text", "string", "i18n", "table", "dialogue", "sub")):
+                        if _has_bundle_magic(bf):
+                            seen_bundles.add(bf)
+                            bundles.append(bf)
+
+        # 3. resources.assets + startup sharedassets*.assets (up to first 12, <= 120 MB each)
         res_file = dd / "resources.assets"
         if res_file.exists() and res_file.is_file():
             resource_assets.append(res_file)
 
-    return {"bundles": sorted(aa_bundles), "resources": sorted(resource_assets)}
+        shared_files = sorted(
+            [p for p in dd.glob("sharedassets*.assets") if p.is_file()],
+            key=_sharedassets_sort_key,
+        )[:12]
+        for sf in shared_files:
+            try:
+                if sf.stat().st_size <= 120 * 1024 * 1024:
+                    resource_assets.append(sf)
+            except OSError:
+                pass
+
+    return {
+        "bundles": sorted(bundles),
+        "resources": resource_assets,
+        "data_dirs": data_dirs,
+    }
 
 
 def _is_i2_language_source(tree: Dict[str, Any]) -> bool:
@@ -135,100 +377,1095 @@ def _is_unity_string_table(tree: Dict[str, Any]) -> bool:
     return isinstance(tree, dict) and "m_TableData" in tree and isinstance(tree.get("m_TableData"), list)
 
 
+def _index_env_monoscripts(env: UnityPy.Environment, idx: Dict[Tuple[str, int], Tuple[str, str]]) -> None:
+    for obj in env.objects:
+        if obj.type.name != "MonoScript":
+            continue
+        try:
+            ms = obj.read()
+            cls = getattr(ms, "m_ClassName", "") or ""
+            mname = getattr(ms, "m_Name", "") or ""
+            fname = Path(getattr(obj.assets_file, "name", "") or "").name.lower()
+            idx[(fname, obj.path_id)] = (cls, mname)
+            idx[("", obj.path_id)] = (cls, mname)
+        except Exception:
+            continue
+
+
+def _build_monoscript_index(data_dirs: List[Path]) -> Dict[Tuple[str, int], Tuple[str, str]]:
+    """Index MonoScript definitions in globalgamemanagers.assets for fast external m_Script resolution."""
+    idx: Dict[Tuple[str, int], Tuple[str, str]] = {}
+    for dd in data_dirs:
+        for ggm_name in ("globalgamemanagers.assets", "globalgamemanagers"):
+            ggm = dd / ggm_name
+            if not ggm.exists() or not ggm.is_file():
+                continue
+            try:
+                if ggm.stat().st_size > 40 * 1024 * 1024:
+                    continue
+                env = UnityPy.load(str(ggm))
+                _index_env_monoscripts(env, idx)
+            except Exception as exc:
+                logger.debug("Could not index MonoScripts from %s: %s", ggm, exc)
+    return idx
+
+
+def _resolve_monobehaviour_identity(
+    obj: Any,
+    local_scripts: Dict[Tuple[str, int], Tuple[str, str]],
+    global_scripts: Dict[Tuple[str, int], Tuple[str, str]],
+) -> Tuple[str, str, str, str]:
+    """Return (mb_name, script_class, script_name, game_object_name) even on prefab-attached MonoBehaviours."""
+    mb_name = ""
+    script_class = ""
+    script_name = ""
+    go_name = ""
+
+    data = None
+    try:
+        data = obj.read()
+        mb_name = getattr(data, "m_Name", "") or ""
+    except Exception:
+        data = None
+
+    sf_ver = getattr(getattr(obj.assets_file, "header", None), "version", 22)
+    externals = getattr(obj.assets_file, "externals", []) or []
+    cur_file = Path(getattr(obj.assets_file, "name", "") or "").name.lower()
+
+    go_fid, go_pid = 0, 0
+    sc_fid, sc_pid = 0, 0
+
+    if data is not None:
+        m_go = getattr(data, "m_GameObject", None)
+        if m_go is not None:
+            go_fid = getattr(m_go, "file_id", 0) or 0
+            go_pid = getattr(m_go, "path_id", 0) or 0
+            if go_fid == 0 and go_pid != 0:
+                try:
+                    go = m_go.read()
+                    go_name = getattr(go, "m_Name", "") or ""
+                except Exception:
+                    pass
+        m_sc = getattr(data, "m_Script", None)
+        if m_sc is not None:
+            sc_fid = getattr(m_sc, "file_id", 0) or 0
+            sc_pid = getattr(m_sc, "path_id", 0) or 0
+            if sc_fid == 0 and sc_pid != 0:
+                try:
+                    sc = m_sc.read()
+                    script_class = getattr(sc, "m_ClassName", "") or ""
+                    script_name = getattr(sc, "m_Name", "") or ""
+                except Exception:
+                    pass
+
+    # Fallback raw header parse if stripped IL2CPP MonoBehaviour lacked TypeTree for base fields
+    if sc_pid == 0 and go_pid == 0 and not mb_name:
+        try:
+            raw = obj.get_raw_data()
+            hdr = _skip_mb_header(raw, sf_ver)
+            if hdr:
+                mb_name = hdr["mb_name"]
+                go_fid, go_pid = hdr["go_fid"], hdr["go_pid"]
+                sc_fid, sc_pid = hdr["sc_fid"], hdr["sc_pid"]
+                if go_fid == 0 and go_pid != 0 and go_pid in obj.assets_file.objects:
+                    try:
+                        go_obj = obj.assets_file.objects[go_pid].read()
+                        go_name = getattr(go_obj, "m_Name", "") or ""
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    if not script_class and sc_pid != 0:
+        ext_name = cur_file
+        if sc_fid > 0 and sc_fid - 1 < len(externals):
+            ext_path = getattr(externals[sc_fid - 1], "path", "") or getattr(externals[sc_fid - 1], "name", "") or ""
+            ext_name = Path(str(ext_path).replace("\\", "/")).name.lower()
+        hit = (
+            local_scripts.get((ext_name, sc_pid))
+            or global_scripts.get((ext_name, sc_pid))
+            or local_scripts.get(("", sc_pid))
+            or global_scripts.get(("", sc_pid))
+        )
+        if hit:
+            script_class, script_name = hit
+
+    return mb_name, script_class, script_name, go_name
+
+
+# ---------------------------------------------------------------------------
+# Stripped TypeTree Raw Binary Fallback Helpers (Unity IL2CPP)
+# ---------------------------------------------------------------------------
+
+def _align4(pos: int) -> int:
+    return (pos + 3) & ~3
+
+
+def _read_unity_str(buf: bytes, pos: int, max_bytes: int = 1_000_000) -> Optional[Tuple[str, int]]:
+    if pos < 0 or pos + 4 > len(buf):
+        return None
+    ln = struct.unpack_from("<i", buf, pos)[0]
+    if ln < 0 or ln > max_bytes or pos + 4 + ln > len(buf):
+        return None
+    raw_slice = buf[pos + 4 : pos + 4 + ln]
+    try:
+        text = raw_slice.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    return text, _align4(pos + 4 + ln)
+
+
+def _write_unity_str(text: str) -> bytes:
+    raw = text.encode("utf-8")
+    pad_len = (-len(raw)) % 4
+    return struct.pack("<i", len(raw)) + raw + (b"\x00" * pad_len)
+
+
+def _skip_mb_header(buf: bytes, sf_version: int) -> Optional[Dict[str, Any]]:
+    pptr_sz = 12 if sf_version >= 14 else 8
+    min_sz = pptr_sz + 4 + pptr_sz + 4
+    if len(buf) < min_sz:
+        return None
+    pos = 0
+    if sf_version >= 14:
+        go_fid, go_pid = struct.unpack_from("<iq", buf, pos)
+        sc_fid, sc_pid = struct.unpack_from("<iq", buf, pos + pptr_sz + 4)
+    else:
+        go_fid, go_pid = struct.unpack_from("<ii", buf, pos)
+        sc_fid, sc_pid = struct.unpack_from("<ii", buf, pos + pptr_sz + 4)
+    pos += pptr_sz + 4 + pptr_sz
+    name_res = _read_unity_str(buf, pos, max_bytes=4096)
+    if name_res is None:
+        return None
+    mb_name, end_pos = name_res
+    return {
+        "mb_name": mb_name,
+        "go_fid": go_fid,
+        "go_pid": go_pid,
+        "sc_fid": sc_fid,
+        "sc_pid": sc_pid,
+        "end_pos": end_pos,
+        "pptr_sz": pptr_sz,
+    }
+
+
+def _parse_binary_string_table(raw: bytes, sf_version: int) -> Optional[Dict[str, Any]]:
+    """Parse stripped-TypeTree Unity StringTable binary payload cleanly."""
+    hdr = _skip_mb_header(raw, sf_version)
+    if not hdr:
+        return None
+    pos = hdr["end_pos"]
+    pptr_sz = hdr["pptr_sz"]
+
+    loc_res = _read_unity_str(raw, pos, max_bytes=64)
+    if loc_res is None:
+        return None
+    loc_code, pos_after_loc = loc_res
+    if not loc_code or not re.match(r"^[A-Za-z0-9_-]{1,24}$", loc_code):
+        return None
+    if not is_known_lang_code(normalize_lang_token(loc_code)):
+        return None
+    if pos_after_loc + pptr_sz + 4 > len(raw):
+        return None
+
+    shared_bytes = raw[pos_after_loc : pos_after_loc + pptr_sz]
+    after_shared = pos_after_loc + pptr_sz
+
+    # Try Unity Localization v1.4+ (with table-level MetadataCollection) first, then v1.0..v1.3 (without)
+    candidate_starts: List[Tuple[bytes, int]] = []
+    if after_shared + 4 <= len(raw):
+        tmeta_cnt = struct.unpack_from("<i", raw, after_shared)[0]
+        if 0 <= tmeta_cnt <= 32 and after_shared + 4 + tmeta_cnt * 8 + 4 <= len(raw):
+            tmeta_end = after_shared + 4 + tmeta_cnt * 8
+            candidate_starts.append((raw[after_shared:tmeta_end], tmeta_end))
+    candidate_starts.append((b"", after_shared))
+
+    for table_meta_bytes, tbl_off in candidate_starts:
+        if tbl_off + 4 > len(raw):
+            continue
+        row_count = struct.unpack_from("<i", raw, tbl_off)[0]
+        if row_count < 1 or row_count > 200_000:
+            continue
+
+        cur = tbl_off + 4
+        rows: List[Dict[str, Any]] = []
+        valid = True
+        for _ in range(row_count):
+            if cur + 12 > len(raw):
+                valid = False
+                break
+            row_id = struct.unpack_from("<q", raw, cur)[0]
+            cur += 8
+            str_res = _read_unity_str(raw, cur)
+            if str_res is None:
+                valid = False
+                break
+            localized_text, cur = str_res
+            if cur + 4 > len(raw):
+                valid = False
+                break
+            meta_cnt = struct.unpack_from("<i", raw, cur)[0]
+            if meta_cnt < 0 or meta_cnt > 64 or cur + 4 + meta_cnt * 8 > len(raw):
+                valid = False
+                break
+            meta_bytes = raw[cur : cur + 4 + meta_cnt * 8]
+            cur += 4 + meta_cnt * 8
+            rows.append({"m_Id": row_id, "m_Localized": localized_text, "meta_bytes": meta_bytes})
+
+        if not valid:
+            continue
+        remaining = len(raw) - cur
+        if remaining == 0 or remaining <= 64 or (remaining >= 4 and struct.unpack_from("<i", raw, cur)[0] in (0, 1, 2)):
+            return {
+                "m_Name": hdr["mb_name"],
+                "m_LocaleId": {"m_Code": loc_code},
+                "prefix_bytes": raw[:pos_after_loc] + shared_bytes + table_meta_bytes,
+                "rows": rows,
+                "suffix_bytes": raw[cur:],
+            }
+    return None
+
+
+def _patch_binary_string_table(
+    raw: bytes,
+    sf_version: int,
+    updates_by_row_id: Dict[int, str],
+) -> Tuple[bytes, int]:
+    parsed = _parse_binary_string_table(raw, sf_version)
+    if not parsed:
+        return raw, 0
+    changed = 0
+    out = bytearray(parsed["prefix_bytes"])
+    rows = parsed["rows"]
+    out.extend(struct.pack("<i", len(rows)))
+    for row in rows:
+        rid = row["m_Id"]
+        val = row["m_Localized"]
+        if rid in updates_by_row_id:
+            val = updates_by_row_id[rid]
+            changed += 1
+        out.extend(struct.pack("<q", rid))
+        out.extend(_write_unity_str(val))
+        out.extend(row["meta_bytes"])
+    out.extend(parsed["suffix_bytes"])
+    return bytes(out), changed
+
+
+def _try_parse_i2_languages_array(raw: bytes, pos: int) -> Optional[Tuple[List[Dict[str, Any]], int, int]]:
+    """Try parsing I2 LanguageSourceData.mLanguages at byte offset `pos`."""
+    if pos + 4 > len(raw):
+        return None
+    lang_count = struct.unpack_from("<i", raw, pos)[0]
+    if not (1 <= lang_count <= 64):
+        return None
+    for flags_step in (4, 1):
+        cur = pos + 4
+        langs: List[Dict[str, Any]] = []
+        valid = True
+        recognized = 0
+        for _ in range(lang_count):
+            name_res = _read_unity_str(raw, cur, max_bytes=128)
+            if name_res is None:
+                valid = False
+                break
+            lname, cur = name_res
+            code_res = _read_unity_str(raw, cur, max_bytes=64)
+            if code_res is None:
+                valid = False
+                break
+            lcode, cur = code_res
+            if cur + flags_step > len(raw):
+                valid = False
+                break
+            flags_bytes = raw[cur : cur + flags_step]
+            cur += flags_step
+            if not lname and not lcode:
+                valid = False
+                break
+            if any(ord(c) < 0x20 for c in lname + lcode):
+                valid = False
+                break
+            norm = normalize_lang_token(lcode or lname)
+            if is_known_lang_code(norm):
+                recognized += 1
+            langs.append({"Name": lname, "Code": lcode, "flags_bytes": flags_bytes})
+        if valid and recognized >= 1:
+            return langs, cur, flags_step
+    return None
+
+
+def _try_parse_i2_terms_array(
+    raw: bytes,
+    pos: int,
+    lang_count: int,
+    max_end: int,
+) -> Optional[Tuple[List[Dict[str, Any]], int, bool]]:
+    """Try parsing I2 LanguageSourceData.mTerms array starting at `pos`."""
+    if pos + 4 > max_end:
+        return None
+    term_count = struct.unpack_from("<i", raw, pos)[0]
+    if not (1 <= term_count <= 200_000):
+        return None
+    for has_touch in (True, False):
+        cur = pos + 4
+        terms: List[Dict[str, Any]] = []
+        valid = True
+        for _ in range(term_count):
+            t_res = _read_unity_str(raw, cur, max_bytes=4096)
+            if t_res is None:
+                valid = False
+                break
+            term_key, cur = t_res
+            if cur + 4 > max_end:
+                valid = False
+                break
+            term_type = struct.unpack_from("<i", raw, cur)[0]
+            if not (0 <= term_type <= 32):
+                valid = False
+                break
+            cur += 4
+            d_res = _read_unity_str(raw, cur, max_bytes=16384)
+            if d_res is None:
+                valid = False
+                break
+            desc, cur = d_res
+            if cur + 4 > max_end:
+                valid = False
+                break
+            arr_len = struct.unpack_from("<i", raw, cur)[0]
+            if arr_len < 0 or arr_len > 64 or abs(arr_len - lang_count) > 2:
+                valid = False
+                break
+            cur += 4
+            vals: List[str] = []
+            for _j in range(arr_len):
+                v_res = _read_unity_str(raw, cur)
+                if v_res is None:
+                    valid = False
+                    break
+                vals.append(v_res[0])
+                cur = v_res[1]
+            if not valid or cur + 4 > max_end:
+                valid = False
+                break
+            flag_cnt = struct.unpack_from("<i", raw, cur)[0]
+            if flag_cnt < 0 or flag_cnt > 64:
+                valid = False
+                break
+            flag_end = _align4(cur + 4 + flag_cnt)
+            if flag_end > max_end:
+                valid = False
+                break
+            flags_blob = raw[cur:flag_end]
+            cur = flag_end
+
+            touch_blob = b""
+            if has_touch:
+                if cur + 4 > max_end:
+                    valid = False
+                    break
+                t_cnt = struct.unpack_from("<i", raw, cur)[0]
+                if t_cnt < 0 or t_cnt > 64:
+                    valid = False
+                    break
+                t_start = cur
+                cur += 4
+                for _j in range(t_cnt):
+                    tv_res = _read_unity_str(raw, cur)
+                    if tv_res is None:
+                        valid = False
+                        break
+                    cur = tv_res[1]
+                if not valid or cur > max_end:
+                    valid = False
+                    break
+                touch_blob = raw[t_start:cur]
+
+            terms.append(
+                {
+                    "Term": term_key,
+                    "TermType": term_type,
+                    "Description": desc,
+                    "Languages": vals,
+                    "flags_blob": flags_blob,
+                    "touch_blob": touch_blob,
+                }
+            )
+        if valid and cur <= max_end:
+            return terms, cur, has_touch
+    return None
+
+
+def _parse_binary_i2_source(raw: bytes, sf_version: int) -> Optional[Dict[str, Any]]:
+    """Parse stripped-TypeTree Unity I2 LanguageSource / LanguageSourceAsset binary payload."""
+    hdr = _skip_mb_header(raw, sf_version)
+    if not hdr:
+        return None
+    start = hdr["end_pos"]
+    # Scan 4-byte aligned offsets for mLanguages array, then locate preceding mTerms array
+    for lang_off in range(start, max(start, len(raw) - 16), 4):
+        lcount = struct.unpack_from("<i", raw, lang_off)[0]
+        if not (1 <= lcount <= 64):
+            continue
+        langs_parsed = _try_parse_i2_languages_array(raw, lang_off)
+        if not langs_parsed:
+            continue
+        langs, langs_end, _flags_step = langs_parsed
+        # Search for mTerms array between header end and lang_off
+        for term_off in range(start, lang_off, 4):
+            tcount = struct.unpack_from("<i", raw, term_off)[0]
+            if not (1 <= tcount <= 200_000):
+                continue
+            terms_parsed = _try_parse_i2_terms_array(raw, term_off, len(langs), lang_off)
+            if not terms_parsed:
+                continue
+            terms, terms_end, has_touch = terms_parsed
+            gap = lang_off - terms_end
+            # Typical gap between mTerms and mLanguages in LanguageSourceData is CaseInsensitiveTerms(4) + OnMissingTranslation(4) + mTerm_AppName(string) (~8..96 bytes)
+            if 0 <= gap <= 256:
+                return {
+                    "m_Name": hdr["mb_name"],
+                    "prefix_bytes": raw[:term_off],
+                    "terms": terms,
+                    "mid_bytes": raw[terms_end:lang_off],
+                    "languages": langs,
+                    "langs_end": langs_end,
+                    "has_touch": has_touch,
+                    "suffix_bytes": raw[lang_off:],
+                }
+    return None
+
+
+def _patch_binary_i2_source(
+    raw: bytes,
+    sf_version: int,
+    lang_index: int,
+    updates_by_term: Dict[str, str],
+) -> Tuple[bytes, int]:
+    parsed = _parse_binary_i2_source(raw, sf_version)
+    if not parsed:
+        return raw, 0
+    changed = 0
+    out = bytearray(parsed["prefix_bytes"])
+    terms = parsed["terms"]
+    out.extend(struct.pack("<i", len(terms)))
+    for term in terms:
+        k = term["Term"]
+        vals = list(term["Languages"])
+        if k in updates_by_term:
+            while len(vals) <= lang_index:
+                vals.append("")
+            vals[lang_index] = updates_by_term[k]
+            changed += 1
+        out.extend(_write_unity_str(k))
+        out.extend(struct.pack("<i", term["TermType"]))
+        out.extend(_write_unity_str(term["Description"]))
+        out.extend(struct.pack("<i", len(vals)))
+        for v in vals:
+            out.extend(_write_unity_str(v))
+        out.extend(term["flags_blob"])
+        out.extend(term["touch_blob"])
+    out.extend(parsed["mid_bytes"])
+    out.extend(parsed["suffix_bytes"])
+    return bytes(out), changed
+
+
+# ---------------------------------------------------------------------------
+# Unity TextAsset Localization Scan / Extract / Write Helpers
+# ---------------------------------------------------------------------------
+
+_TEXTASSET_HINT_TOKENS = (
+    "loc", "lang", "i18n", "l10n", "i2", "string", "text", "dialog",
+    "sub", "translat", "table", "caption", "glossary",
+)
+
+
+def _decode_textasset_script(ta: Any) -> Optional[str]:
+    script = getattr(ta, "m_Script", None)
+    if script is None:
+        return None
+    if isinstance(script, bytes):
+        if len(script) < 16 or len(script) > 15 * 1024 * 1024 or b"\x00" in script[:2048]:
+            return None
+        if script.startswith(b"\xef\xbb\xbf"):
+            return script[3:].decode("utf-8", errors="replace")
+        return script.decode("utf-8", errors="replace")
+    if isinstance(script, str):
+        if len(script) < 16 or len(script) > 15 * 1024 * 1024 or "\x00" in script[:2048]:
+            return None
+        return script
+    return None
+
+
+def _walk_json_strings_local(obj: Any, path: str = "") -> List[Tuple[str, str]]:
+    found: List[Tuple[str, str]] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            nxt = f"{path}.{k}" if path else str(k)
+            found.extend(_walk_json_strings_local(v, nxt))
+    elif isinstance(obj, list):
+        for idx, v in enumerate(obj):
+            nxt = f"{path}[{idx}]"
+            found.extend(_walk_json_strings_local(v, nxt))
+    elif isinstance(obj, str) and is_translatable_string(obj):
+        found.append((path, obj))
+    return found
+
+
+def _set_json_path_local(obj: Any, path: str, value: str) -> None:
+    tokens = re.findall(r"[^.\[\]]+|\[\d+\]", path)
+    cur = obj
+    for i, tok in enumerate(tokens):
+        is_last = i == len(tokens) - 1
+        if tok.startswith("[") and tok.endswith("]"):
+            idx = int(tok[1:-1])
+            if is_last:
+                cur[idx] = value
+            else:
+                cur = cur[idx]
+        else:
+            if is_last:
+                cur[tok] = value
+            else:
+                cur = cur[tok]
+
+
+def _count_csv_non_empty_rows(text: str, delim: str, col_hdr: str) -> int:
+    try:
+        rows = list(csv.reader(io.StringIO(text), delimiter=delim))
+        if len(rows) < 2:
+            return 0
+        idx = rows[0].index(col_hdr)
+        return sum(1 for r in rows[1:] if idx < len(r) and str(r[idx]).strip())
+    except Exception:
+        return 0
+
+
+def _scan_text_asset(obj: Any, asset_file: Path, slots: Dict[str, Dict[str, Any]]) -> None:
+    """Detect localization tables stored as Unity TextAsset (CSV/TSV, JSON, XML, PO, KV)."""
+    try:
+        ta = obj.read()
+        name = getattr(ta, "m_Name", "") or ""
+    except Exception:
+        return
+    name_low = name.lower()
+    name_code = normalize_lang_token(name)
+    if not any(tok in name_low for tok in _TEXTASSET_HINT_TOKENS) and not is_known_lang_code(name_code):
+        return
+
+    text = _decode_textasset_script(ta)
+    if not text:
+        return
+    stripped = text.lstrip()
+
+    def _add_ta_slot(
+        code: str,
+        raw_code: str,
+        provider: str,
+        fmt_kind: str,
+        count: int,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        slot = slots.setdefault(
+            code,
+            {
+                "slot_id": code,
+                "raw_code": raw_code,
+                "provider": provider,
+                "files": [],
+                "text_assets": [],
+                "count": 0,
+            },
+        )
+        if str(asset_file) not in slot["files"]:
+            slot["files"].append(str(asset_file))
+        meta = {
+            "file": str(asset_file),
+            "path_id": obj.path_id,
+            "name": name,
+            "format": fmt_kind,
+        }
+        if extra:
+            meta.update(extra)
+        slot.setdefault("text_assets", []).append(meta)
+        slot["count"] += count
+
+    # 1. Multi-column CSV/TSV inside TextAsset
+    csv_hit = sniff_csv_headers_from_text(text)
+    if csv_hit:
+        delim, cols = csv_hit
+        for col_hdr in cols:
+            code = normalize_lang_token(col_hdr)
+            cnt = _count_csv_non_empty_rows(text, delim, col_hdr)
+            if cnt > 0:
+                _add_ta_slot(
+                    code,
+                    col_hdr,
+                    "Unity TextAsset (CSV)",
+                    "csv_multi",
+                    cnt,
+                    {"delimiter": delim, "column": col_hdr},
+                )
+        return
+
+    # 2. JSON (multi-language top-level dict OR single-language dict/array)
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            lang_keys = [k for k, v in data.items() if is_known_lang_code(normalize_lang_token(str(k))) and isinstance(v, (dict, list))]
+            if len(lang_keys) >= 2:
+                for lk in lang_keys:
+                    code = normalize_lang_token(str(lk))
+                    cnt = len(_walk_json_strings_local(data[lk]))
+                    if cnt > 0:
+                        _add_ta_slot(
+                            code,
+                            str(lk),
+                            "Unity TextAsset (JSON)",
+                            "json_multi",
+                            cnt,
+                            {"json_lang_key": str(lk)},
+                        )
+                return
+        if data is not None and is_known_lang_code(name_code):
+            strings = _walk_json_strings_local(data)
+            if len(strings) >= 3:
+                _add_ta_slot(name_code, name, "Unity TextAsset (JSON)", "json_single", len(strings))
+                return
+
+    # Require known language token for single-language XML/PO/KV TextAssets
+    if not is_known_lang_code(name_code):
+        return
+
+    # 3. Single-language XML
+    if stripped.startswith("<"):
+        try:
+            root_xml = ET.fromstring(text)
+            cnt = sum(1 for el in root_xml.iter() if el.text and is_translatable_string(el.text))
+            if cnt >= 3:
+                _add_ta_slot(name_code, name, "Unity TextAsset (XML)", "xml_single", cnt)
+                return
+        except Exception:
+            pass
+
+    # 4. Single-language PO
+    if "msgid " in text[:2048] and "msgstr " in text[:2048]:
+        try:
+            po = polib.pofile(text)
+            cnt = sum(1 for e in po if is_translatable_string(e.msgstr if e.msgstr.strip() else e.msgid))
+            if cnt >= 3:
+                _add_ta_slot(name_code, name, "Unity TextAsset (PO)", "po_single", cnt)
+                return
+        except Exception:
+            pass
+
+    # 5. Single-language Key=Value
+    kv_cnt = 0
+    for line in text.splitlines():
+        if line.lstrip().startswith(("#", ";", "[")):
+            continue
+        sep = "=" if "=" in line else None
+        if sep:
+            _, v = line.split(sep, 1)
+            if is_translatable_string(v):
+                kv_cnt += 1
+    if kv_cnt >= 3:
+        _add_ta_slot(name_code, name, "Unity TextAsset (Text)", "kv_single", kv_cnt)
+
+
+def _extract_from_text_asset(
+    ta: Any,
+    ta_meta: Dict[str, Any],
+    fpath: Path,
+    slot_code: str,
+) -> List[LocEntry]:
+    entries: List[LocEntry] = []
+    text = _decode_textasset_script(ta)
+    if not text:
+        return entries
+
+    fmt_kind = ta_meta.get("format", "")
+    ta_name = getattr(ta, "m_Name", "") or fpath.stem
+
+    if fmt_kind == "csv_multi":
+        delim = ta_meta.get("delimiter", ",")
+        col_name = ta_meta.get("column", "")
+        rows = list(csv.reader(io.StringIO(text), delimiter=delim))
+        if not rows or col_name not in rows[0]:
+            return entries
+        col_idx = rows[0].index(col_name)
+        for r_i in range(1, len(rows)):
+            row = rows[r_i]
+            if col_idx >= len(row):
+                continue
+            val = row[col_idx]
+            k = row[0] if row else f"ROW_{r_i}"
+            if not is_translatable_string(val):
+                continue
+            entries.append(
+                LocEntry(
+                    entry_id=f"unity_ta::{fpath.name}::{ta_meta['path_id']}::{r_i}::{col_idx}",
+                    key=k,
+                    text=val,
+                    file_path=str(fpath),
+                    lang=slot_code,
+                    fmt="unity_textasset_csv",
+                    category=classify_entry_category(k, val),
+                    location_meta={"path_id": ta_meta["path_id"], "row_idx": r_i, "col_idx": col_idx, "table_name": ta_name},
+                )
+            )
+    elif fmt_kind in ("json_multi", "json_single"):
+        data = json.loads(text)
+        sub = data.get(ta_meta.get("json_lang_key", ""), {}) if fmt_kind == "json_multi" else data
+        for jpath, val in _walk_json_strings_local(sub):
+            entries.append(
+                LocEntry(
+                    entry_id=f"unity_ta::{fpath.name}::{ta_meta['path_id']}::{jpath}",
+                    key=jpath,
+                    text=val,
+                    file_path=str(fpath),
+                    lang=slot_code,
+                    fmt="unity_textasset_json",
+                    category=classify_entry_category(jpath, val),
+                    location_meta={"path_id": ta_meta["path_id"], "json_path": jpath, "table_name": ta_name},
+                )
+            )
+    elif fmt_kind == "xml_single":
+        root_xml = ET.fromstring(text)
+        for idx, elem in enumerate(root_xml.iter()):
+            if elem.text and is_translatable_string(elem.text):
+                k = elem.attrib.get("name") or elem.attrib.get("id") or f"{elem.tag}_{idx}"
+                entries.append(
+                    LocEntry(
+                        entry_id=f"unity_ta::{fpath.name}::{ta_meta['path_id']}::{idx}",
+                        key=k,
+                        text=elem.text,
+                        file_path=str(fpath),
+                        lang=slot_code,
+                        fmt="unity_textasset_xml",
+                        category=classify_entry_category(k, elem.text),
+                        location_meta={"path_id": ta_meta["path_id"], "xml_idx": idx, "table_name": ta_name},
+                    )
+                )
+    elif fmt_kind == "po_single":
+        po = polib.pofile(text)
+        for idx, e in enumerate(po):
+            val = e.msgstr if e.msgstr.strip() else e.msgid
+            if not is_translatable_string(val):
+                continue
+            k = e.msgctxt or f"PO_{idx}"
+            entries.append(
+                LocEntry(
+                    entry_id=f"unity_ta::{fpath.name}::{ta_meta['path_id']}::{idx}",
+                    key=k,
+                    text=val,
+                    file_path=str(fpath),
+                    lang=slot_code,
+                    fmt="unity_textasset_po",
+                    category=classify_entry_category(k, val),
+                    location_meta={"path_id": ta_meta["path_id"], "po_idx": idx, "table_name": ta_name},
+                )
+            )
+    elif fmt_kind == "kv_single":
+        for l_i, line in enumerate(text.splitlines()):
+            if line.lstrip().startswith(("#", ";", "[")):
+                continue
+            sep = "=" if "=" in line else ("\t" if "\t" in line else None)
+            if not sep:
+                continue
+            k, v = line.split(sep, 1)
+            if not is_translatable_string(v):
+                continue
+            entries.append(
+                LocEntry(
+                    entry_id=f"unity_ta::{fpath.name}::{ta_meta['path_id']}::{l_i}",
+                    key=k.strip(),
+                    text=v,
+                    file_path=str(fpath),
+                    lang=slot_code,
+                    fmt="unity_textasset_kv",
+                    category=classify_entry_category(k.strip(), v),
+                    location_meta={"path_id": ta_meta["path_id"], "line_idx": l_i, "table_name": ta_name},
+                )
+            )
+    return entries
+
+
+def _patch_text_asset_script(
+    ta: Any,
+    ta_meta: Dict[str, Any],
+    source_entries: List[LocEntry],
+    by_key: Dict[str, str],
+    by_src_text: Dict[str, str],
+) -> int:
+    text = _decode_textasset_script(ta)
+    if not text:
+        return 0
+    fmt_kind = ta_meta.get("format", "")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    updated = 0
+    new_text: Optional[str] = None
+
+    if fmt_kind == "csv_multi":
+        delim = ta_meta.get("delimiter", ",")
+        col_name = ta_meta.get("column", "")
+        rows = list(csv.reader(io.StringIO(text), delimiter=delim))
+        if rows and col_name in rows[0]:
+            col_idx = rows[0].index(col_name)
+            src_by_row = {
+                e.location_meta.get("row_idx"): (by_key.get(e.key) or by_src_text.get(e.text))
+                for e in source_entries
+                if "row_idx" in e.location_meta
+            }
+            for r_i in range(1, len(rows)):
+                row = rows[r_i]
+                while len(row) <= col_idx:
+                    row.append("")
+                k_val = row[0] if row else ""
+                tr = src_by_row.get(r_i) or by_key.get(k_val) or by_src_text.get(row[col_idx])
+                if tr:
+                    row[col_idx] = tr
+                    updated += 1
+            buf = io.StringIO()
+            writer = csv.writer(buf, delimiter=delim, lineterminator=newline)
+            writer.writerows(rows)
+            new_text = buf.getvalue()
+
+    elif fmt_kind in ("json_multi", "json_single"):
+        data = json.loads(text)
+        sub = data.get(ta_meta.get("json_lang_key", ""), {}) if fmt_kind == "json_multi" else data
+        for jpath, val in _walk_json_strings_local(sub):
+            tr = by_key.get(jpath) or by_src_text.get(val)
+            if tr:
+                _set_json_path_local(sub, jpath, tr)
+                updated += 1
+        new_text = json.dumps(data, indent=2, ensure_ascii=False)
+
+    elif fmt_kind == "xml_single":
+        tree_xml = ET.ElementTree(ET.fromstring(text))
+        for idx, elem in enumerate(tree_xml.getroot().iter()):
+            k = elem.attrib.get("name") or elem.attrib.get("id") or f"{elem.tag}_{idx}"
+            tr = by_key.get(k) or (elem.text and by_src_text.get(elem.text))
+            if tr:
+                elem.text = tr
+                updated += 1
+        new_text = ET.tostring(tree_xml.getroot(), encoding="unicode")
+
+    elif fmt_kind == "po_single":
+        po = polib.pofile(text)
+        for e in po:
+            k = e.msgctxt or ""
+            tr = (k and by_key.get(k)) or by_src_text.get(e.msgid) or by_src_text.get(e.msgstr)
+            if tr:
+                e.msgstr = tr
+                updated += 1
+        new_text = str(po)
+
+    elif fmt_kind == "kv_single":
+        out_lines = []
+        for line in text.splitlines():
+            sep = "=" if "=" in line else ("\t" if "\t" in line else None)
+            if sep and not line.lstrip().startswith(("#", ";", "[")):
+                k, v = line.split(sep, 1)
+                tr = by_key.get(k.strip()) or by_src_text.get(v)
+                if tr:
+                    out_lines.append(f"{k}{sep}{tr}")
+                    updated += 1
+                    continue
+            out_lines.append(line)
+        new_text = newline.join(out_lines)
+
+    if new_text is not None and updated > 0:
+        ta.m_Script = new_text
+        ta.save()
+    return updated
+
+
+def diagnose_unity_empty_scan(game_dir: str | Path) -> Optional[str]:
+    """Return a helpful Vietnamese diagnostic hint when a Unity game yields 0 localization slots."""
+    root = Path(game_dir)
+    if (root / "GameAssembly.dll").exists():
+        return "Unity IL2CPP (chưa tìm thấy StringTable/I2/TextAsset chuẩn — dữ liệu ngôn ngữ có thể đóng gói định dạng riêng)"
+    if any(root.glob("*_Data")):
+        return "Unity (chưa tìm thấy bảng ngôn ngữ chuẩn — có thể game lưu chữ trực tiếp trong Scene hoặc định dạng riêng)"
+    return None
+
+
+_NON_LOC_UNITY_CLASSES = frozenset(
+    {
+        "rectmask2d", "text", "textmeshpro", "textmeshprougui", "tmp_text",
+        "inputfield", "tmp_inputfield", "scrollrect", "graphicraycaster",
+        "canvasscaler", "eventsystem", "contentsizefitter", "image", "button",
+        "mask", "shadow", "outline", "scrollbar", "dropdown", "tmp_dropdown",
+        "slider", "toggle", "togglegroup", "verticallayoutgroup", "horizontallayoutgroup",
+        "gridlayoutgroup", "aspectratiofitter", "layoutelement", "canvasgroup",
+    }
+)
+
+
+def _identity_looks_localizable(mb_name: str, script_class: str, script_name: str, go_name: str) -> bool:
+    cls_low = (script_class or "").strip().lower()
+    if cls_low in _NON_LOC_UNITY_CLASSES:
+        return False
+    joined = " ".join((mb_name, script_class, script_name, go_name)).lower()
+    return any(
+        tok in joined
+        for tok in ("i2", "lang", "loc", "stringtable", "text", "dialog", "sub", "i18n", "l10n")
+    )
+
+
 def scan_unity_loc_tables(game_dir: str | Path) -> List[Dict[str, Any]]:
-    """Fast scan of Unity native localization assets (StringTable & I2Languages)."""
+    """Fast scan of Unity native localization assets (StringTable, I2Languages, TextAsset, stripped IL2CPP fallback)."""
     root = Path(game_dir)
     candidates = find_unity_loc_candidates(root)
+    global_scripts = _build_monoscript_index(candidates.get("data_dirs", []))
     slots: Dict[str, Dict[str, Any]] = {}
 
-    # 1. Addressables StringTable bundles (fast scan by filename + verification of first MonoBehaviour)
+    def _register_st_slot(
+        loc_code: str,
+        hint_name: str,
+        asset_file: Path,
+        provider_label: str,
+        count: int,
+        raw_binary: bool = False,
+    ) -> None:
+        code = normalize_lang_token(loc_code or hint_name)
+        slot = slots.setdefault(
+            code,
+            {
+                "slot_id": code,
+                "raw_code": loc_code or hint_name,
+                "provider": provider_label,
+                "files": [],
+                "count": 0,
+            },
+        )
+        if str(asset_file) not in slot["files"]:
+            slot["files"].append(str(asset_file))
+        if raw_binary:
+            slot["raw_binary"] = True
+        slot["count"] += count
+
+    # 1. Addressables & StreamingAssets AssetBundles (StringTable, I2Languages, TextAsset)
     for bf in candidates["bundles"]:
         lang_hint = normalize_lang_token(bf.stem)
         try:
             env = UnityPy.load(str(bf))
-            found_tables = 0
-            found_i2 = False
-            for obj in env.objects:
-                if obj.type.name != "MonoBehaviour":
-                    continue
-                tree = obj.read_typetree()
-                if _is_unity_string_table(tree):
-                    found_tables += 1
-                    locale_id = tree.get("m_LocaleId")
-                    loc_code = ""
-                    if isinstance(locale_id, dict):
-                        loc_code = locale_id.get("m_Code", "") or ""
-                    elif isinstance(locale_id, str):
-                        loc_code = locale_id
-                    code = normalize_lang_token(loc_code or lang_hint)
-                    slot = slots.setdefault(
-                        code,
-                        {
-                            "slot_id": code,
-                            "raw_code": loc_code or lang_hint,
-                            "provider": "Unity StringTable (Addressables)",
-                            "files": [],
-                            "count": 0,
-                        },
-                    )
-                    if str(bf) not in slot["files"]:
-                        slot["files"].append(str(bf))
-                    slot["count"] += sum(1 for row in tree.get("m_TableData", []) if row.get("m_Localized"))
-                elif _is_i2_language_source(tree):
-                    found_i2 = True
-                    _register_i2_slots(tree, bf, slots)
-            if not found_tables and not found_i2:
-                continue
-        except Exception as exc:
-            logger.debug("Skipping Unity bundle %s: %s", bf.name, exc)
+            local_scripts: Dict[Tuple[str, int], Tuple[str, str]] = {}
+            _index_env_monoscripts(env, local_scripts)
 
-    # 2. Check resources.assets strictly for MonoBehaviour objects named I2Languages / StringTable / LanguageSource
-    for rf in candidates["resources"]:
-        try:
-            env = UnityPy.load(str(rf))
             for obj in env.objects:
+                if obj.type.name == "TextAsset":
+                    _scan_text_asset(obj, bf, slots)
+                    continue
                 if obj.type.name != "MonoBehaviour":
                     continue
-                try:
-                    data = obj.read()
-                    name = getattr(data, "m_Name", "") or ""
-                except Exception:
-                    name = ""
-                if not any(tok in name.lower() for tok in ("i2", "lang", "loc", "stringtable", "text")):
-                    continue
+
+                mb_name, sc_cls, sc_name, go_name = _resolve_monobehaviour_identity(obj, local_scripts, global_scripts)
                 try:
                     tree = obj.read_typetree()
                 except Exception:
+                    tree = None
+
+                if _is_unity_string_table(tree):
+                    locale_id = tree.get("m_LocaleId")
+                    loc_code = (
+                        (locale_id.get("m_Code", "") or "")
+                        if isinstance(locale_id, dict)
+                        else (locale_id if isinstance(locale_id, str) else "")
+                    )
+                    cnt = sum(1 for row in tree.get("m_TableData", []) if row.get("m_Localized"))
+                    _register_st_slot(loc_code, lang_hint or mb_name, bf, "Unity StringTable (Addressables)", cnt)
+                elif _is_i2_language_source(tree):
+                    _register_i2_slots(tree, bf, slots)
+                elif _identity_looks_localizable(mb_name, sc_cls, sc_name, go_name):
+                    # Stripped TypeTree binary fallback (common in Unity IL2CPP)
+                    sf_ver = getattr(getattr(obj.assets_file, "header", None), "version", 22)
+                    raw_bytes = obj.get_raw_data()
+                    st_bin = _parse_binary_string_table(raw_bytes, sf_ver)
+                    if st_bin:
+                        loc_code = st_bin["m_LocaleId"]["m_Code"]
+                        cnt = sum(1 for r in st_bin["rows"] if r["m_Localized"])
+                        _register_st_slot(loc_code, lang_hint or mb_name, bf, "Unity StringTable (IL2CPP Binary)", cnt, raw_binary=True)
+                    else:
+                        i2_bin = _parse_binary_i2_source(raw_bytes, sf_ver)
+                        if i2_bin:
+                            _register_i2_slots(i2_bin, bf, slots, provider="Unity I2 Localization (IL2CPP Binary)", raw_binary=True)
+        except Exception as exc:
+            logger.debug("Skipping Unity bundle %s: %s", bf.name, exc)
+
+    # 2. Check resources.assets & startup sharedassets*.assets for I2Languages Prefabs, StringTable & TextAsset
+    for rf in candidates["resources"]:
+        try:
+            env = UnityPy.load(str(rf))
+            local_scripts = {}
+            _index_env_monoscripts(env, local_scripts)
+
+            for obj in env.objects:
+                if obj.type.name == "TextAsset":
+                    _scan_text_asset(obj, rf, slots)
                     continue
+                if obj.type.name != "MonoBehaviour":
+                    continue
+
+                mb_name, sc_cls, sc_name, go_name = _resolve_monobehaviour_identity(obj, local_scripts, global_scripts)
+                if not _identity_looks_localizable(mb_name, sc_cls, sc_name, go_name):
+                    continue
+
+                try:
+                    tree = obj.read_typetree()
+                except Exception:
+                    tree = None
+
                 if _is_i2_language_source(tree):
                     _register_i2_slots(tree, rf, slots)
                 elif _is_unity_string_table(tree):
                     locale_id = tree.get("m_LocaleId")
                     loc_code = locale_id.get("m_Code", "") if isinstance(locale_id, dict) else str(locale_id or "")
-                    code = normalize_lang_token(loc_code or name or "en")
-                    slot = slots.setdefault(
-                        code,
-                        {
-                            "slot_id": code,
-                            "raw_code": loc_code or code,
-                            "provider": "Unity StringTable (resources.assets)",
-                            "files": [],
-                            "count": 0,
-                        },
-                    )
-                    if str(rf) not in slot["files"]:
-                        slot["files"].append(str(rf))
-                    slot["count"] += len(tree.get("m_TableData", []))
+                    cand_code = normalize_lang_token(loc_code or mb_name or go_name or "en")
+                    if cand_code in slots and "Addressables" in slots[cand_code].get("provider", ""):
+                        continue
+                    _register_st_slot(loc_code, mb_name or go_name or "en", rf, f"Unity StringTable ({rf.name})", len(tree.get("m_TableData", [])))
+                else:
+                    # Stripped TypeTree fallback on Unity IL2CPP Prefabs / ScriptableObjects
+                    sf_ver = getattr(getattr(obj.assets_file, "header", None), "version", 22)
+                    raw_bytes = obj.get_raw_data()
+                    i2_bin = _parse_binary_i2_source(raw_bytes, sf_ver)
+                    if i2_bin:
+                        _register_i2_slots(i2_bin, rf, slots, provider="Unity I2 Localization (IL2CPP Binary)", raw_binary=True)
+                    else:
+                        st_bin = _parse_binary_string_table(raw_bytes, sf_ver)
+                        if st_bin:
+                            loc_code = st_bin["m_LocaleId"]["m_Code"]
+                            cand_code = normalize_lang_token(loc_code or mb_name or go_name or "en")
+                            if cand_code in slots and "Addressables" in slots[cand_code].get("provider", ""):
+                                continue
+                            cnt = sum(1 for r in st_bin["rows"] if r["m_Localized"])
+                            _register_st_slot(loc_code, mb_name or go_name or "en", rf, f"Unity StringTable ({rf.name} Binary)", cnt, raw_binary=True)
         except Exception as exc:
             logger.debug("Skipping Unity resource %s: %s", rf.name, exc)
 
     return list(slots.values())
 
 
-def _register_i2_slots(tree: Dict[str, Any], asset_file: Path, slots: Dict[str, Dict[str, Any]]) -> None:
-    src = tree.get("mSource", tree)
-    langs = src.get("mLanguages", [])
-    terms = src.get("mTerms", [])
+def _register_i2_slots(
+    tree: Dict[str, Any],
+    asset_file: Path,
+    slots: Dict[str, Dict[str, Any]],
+    provider: str = "Unity I2 Localization",
+    raw_binary: bool = False,
+) -> None:
+    if "languages" in tree and "terms" in tree:
+        langs = tree["languages"]
+        terms = tree["terms"]
+    else:
+        src = tree.get("mSource", tree)
+        langs = src.get("mLanguages", [])
+        terms = src.get("mTerms", [])
+
     for idx, lang_info in enumerate(langs):
         raw_name = lang_info.get("Name") or lang_info.get("Code") or f"lang_{idx}"
         raw_code = lang_info.get("Code") or raw_name
@@ -240,11 +1477,13 @@ def _register_i2_slots(tree: Dict[str, Any], asset_file: Path, slots: Dict[str, 
                 "raw_code": raw_code,
                 "raw_name": raw_name,
                 "lang_index": idx,
-                "provider": "Unity I2 Localization",
+                "provider": provider,
                 "files": [],
                 "count": 0,
             },
         )
+        if raw_binary:
+            slot["raw_binary"] = True
         if str(asset_file) not in slot["files"]:
             slot["files"].append(str(asset_file))
         non_empty = 0
@@ -274,31 +1513,125 @@ def _load_shared_table_keys(env: UnityPy.Environment) -> Dict[int, str]:
 
 
 def extract_unity_slot_entries(game_dir: str | Path, slot_info: Dict[str, Any]) -> List[LocEntry]:
-    """Extract all translatable entries from the chosen Unity localization slot."""
+    """Extract all translatable entries from the chosen Unity localization slot (StringTable / I2 / TextAsset)."""
     entries: List[LocEntry] = []
     files = [Path(p) for p in slot_info.get("files", [])]
     slot_code = slot_info["slot_id"]
     provider = slot_info.get("provider", "")
 
+    # Group TextAsset targets by file when present
+    ta_by_file: Dict[str, List[Dict[str, Any]]] = {}
+    for ta_meta in slot_info.get("text_assets", []):
+        ta_by_file.setdefault(str(Path(ta_meta["file"]).resolve()), []).append(ta_meta)
+
     for fpath in files:
         if not fpath.exists():
             continue
         env = UnityPy.load(str(fpath))
+        resolved_str = str(fpath.resolve())
+
+        # Extract TextAssets registered for this slot
+        ta_targets = ta_by_file.get(resolved_str, [])
+        if ta_targets:
+            by_pid = {t["path_id"]: t for t in ta_targets}
+            by_name = {t["name"]: t for t in ta_targets if t.get("name")}
+            for obj in env.objects:
+                if obj.type.name != "TextAsset":
+                    continue
+                meta = by_pid.get(obj.path_id)
+                ta = obj.read()
+                if meta is None:
+                    meta = by_name.get(getattr(ta, "m_Name", ""))
+                if meta:
+                    entries.extend(_extract_from_text_asset(ta, meta, fpath, slot_code))
+            continue
+
         shared_keys = _load_shared_table_keys(env)
+        sf_ver = getattr(getattr(env.file, "header", None), "version", 22)
         for obj in env.objects:
             if obj.type.name != "MonoBehaviour":
                 continue
             try:
                 tree = obj.read_typetree()
             except Exception:
+                tree = None
+
+            if tree is not None and (_is_i2_language_source(tree) or _is_unity_string_table(tree)):
+                table_name = str(tree.get("m_Name") or fpath.stem)
+                if "I2" in provider or _is_i2_language_source(tree):
+                    src = tree.get("mSource", tree)
+                    langs = src.get("mLanguages", [])
+                    terms = src.get("mTerms", [])
+                    target_idx = slot_info.get("lang_index")
+                    if target_idx is None:
+                        for i, l in enumerate(langs):
+                            if normalize_lang_token(l.get("Code") or l.get("Name") or "") == slot_code:
+                                target_idx = i
+                                break
+                    if target_idx is None:
+                        continue
+                    for t_idx, term in enumerate(terms):
+                        key = str(term.get("Term") or f"I2_{t_idx}")
+                        vals = term.get("Languages", [])
+                        val = str(vals[target_idx]) if target_idx < len(vals) and vals[target_idx] is not None else ""
+                        if not is_translatable_string(val):
+                            continue
+                        cat = classify_entry_category(key, val)
+                        eid = f"unity_i2::{fpath.name}::{obj.path_id}::{t_idx}"
+                        entries.append(
+                            LocEntry(
+                                entry_id=eid,
+                                key=key,
+                                text=val,
+                                file_path=str(fpath),
+                                lang=slot_code,
+                                fmt="unity_i2",
+                                category=cat,
+                                location_meta={
+                                    "path_id": obj.path_id,
+                                    "term_index": t_idx,
+                                    "lang_index": target_idx,
+                                    "table_name": table_name,
+                                },
+                            )
+                        )
+                elif _is_unity_string_table(tree):
+                    rows = tree.get("m_TableData", [])
+                    for r_idx, row in enumerate(rows):
+                        val = str(row.get("m_Localized") or "")
+                        if not is_translatable_string(val):
+                            continue
+                        row_id = int(row.get("m_Id", r_idx))
+                        friendly_key = shared_keys.get(row_id) or str(row.get("m_Key") or f"{table_name}_{row_id}")
+                        cat = classify_entry_category(friendly_key, val)
+                        eid = f"unity_st::{fpath.name}::{obj.path_id}::{row_id}"
+                        entries.append(
+                            LocEntry(
+                                entry_id=eid,
+                                key=friendly_key,
+                                text=val,
+                                file_path=str(fpath),
+                                lang=slot_code,
+                                fmt="unity_stringtable",
+                                category=cat,
+                                location_meta={
+                                    "path_id": obj.path_id,
+                                    "row_id": row_id,
+                                    "row_index": r_idx,
+                                    "table_name": table_name,
+                                },
+                            )
+                        )
                 continue
 
-            table_name = str(tree.get("m_Name") or fpath.stem)
-
-            if "I2" in provider or _is_i2_language_source(tree):
-                src = tree.get("mSource", tree)
-                langs = src.get("mLanguages", [])
-                terms = src.get("mTerms", [])
+            # Raw binary fallback for stripped TypeTree IL2CPP MonoBehaviours
+            obj_sf_ver = getattr(getattr(obj.assets_file, "header", None), "version", sf_ver)
+            raw_bytes = obj.get_raw_data()
+            i2_bin = _parse_binary_i2_source(raw_bytes, obj_sf_ver)
+            if i2_bin:
+                langs = i2_bin["languages"]
+                terms = i2_bin["terms"]
+                table_name = i2_bin.get("m_Name") or fpath.stem
                 target_idx = slot_info.get("lang_index")
                 if target_idx is None:
                     for i, l in enumerate(langs):
@@ -314,10 +1647,9 @@ def extract_unity_slot_entries(game_dir: str | Path, slot_info: Dict[str, Any]) 
                     if not is_translatable_string(val):
                         continue
                     cat = classify_entry_category(key, val)
-                    eid = f"unity_i2::{fpath.name}::{obj.path_id}::{t_idx}"
                     entries.append(
                         LocEntry(
-                            entry_id=eid,
+                            entry_id=f"unity_i2::{fpath.name}::{obj.path_id}::{t_idx}",
                             key=key,
                             text=val,
                             file_path=str(fpath),
@@ -329,23 +1661,25 @@ def extract_unity_slot_entries(game_dir: str | Path, slot_info: Dict[str, Any]) 
                                 "term_index": t_idx,
                                 "lang_index": target_idx,
                                 "table_name": table_name,
+                                "raw_binary": True,
                             },
                         )
                     )
+                continue
 
-            elif _is_unity_string_table(tree):
-                rows = tree.get("m_TableData", [])
-                for r_idx, row in enumerate(rows):
-                    val = str(row.get("m_Localized") or "")
+            st_bin = _parse_binary_string_table(raw_bytes, obj_sf_ver)
+            if st_bin:
+                table_name = st_bin.get("m_Name") or fpath.stem
+                for r_idx, row in enumerate(st_bin["rows"]):
+                    val = row["m_Localized"]
                     if not is_translatable_string(val):
                         continue
-                    row_id = int(row.get("m_Id", r_idx))
-                    friendly_key = shared_keys.get(row_id) or str(row.get("m_Key") or f"{table_name}_{row_id}")
+                    row_id = int(row["m_Id"])
+                    friendly_key = shared_keys.get(row_id) or f"{table_name}_{row_id}"
                     cat = classify_entry_category(friendly_key, val)
-                    eid = f"unity_st::{fpath.name}::{obj.path_id}::{row_id}"
                     entries.append(
                         LocEntry(
-                            entry_id=eid,
+                            entry_id=f"unity_st::{fpath.name}::{obj.path_id}::{row_id}",
                             key=friendly_key,
                             text=val,
                             file_path=str(fpath),
@@ -357,6 +1691,7 @@ def extract_unity_slot_entries(game_dir: str | Path, slot_info: Dict[str, Any]) 
                                 "row_id": row_id,
                                 "row_index": r_idx,
                                 "table_name": table_name,
+                                "raw_binary": True,
                             },
                         )
                     )
@@ -1225,7 +2560,7 @@ def apply_unity_translations(
     target_lang: str = "vi",
     source_slot_code: str = "",
 ) -> Dict[str, Any]:
-    """Write translated strings into inject_slot_info (same slot OR piggybacked slot) & sync catalog.bin."""
+    """Write translated strings into inject_slot_info (StringTable / I2 / TextAsset / IL2CPP binary) & sync catalog."""
     root = Path(game_dir)
     target_files = [Path(p) for p in inject_slot_info.get("files", [])]
     if not target_files:
@@ -1233,7 +2568,6 @@ def apply_unity_translations(
 
     target_slot_code = inject_slot_info["slot_id"]
     target_lang_idx = inject_slot_info.get("lang_index")
-    src_code = source_slot_code or (source_entries[0].lang if source_entries else "")
     norm_slot_for_label = normalize_lang_token(target_slot_code)
     is_piggyback = bool(
         norm_slot_for_label != normalize_lang_token(target_lang or "")
@@ -1246,9 +2580,10 @@ def apply_unity_translations(
         or ()
     )
 
-    # Build lookup by (table_name, row_id) and by entry key
+    # Build lookup by (table_name, row_id), key, and source text
     by_table_row: Dict[Tuple[str, Any], str] = {}
     by_key: Dict[str, str] = {}
+    by_src_text: Dict[str, str] = {}
     for e in source_entries:
         tr = translations.get(e.text) or translations.get(e.entry_id)
         if is_piggyback and e.text.strip() in autonym_set:
@@ -1256,12 +2591,16 @@ def apply_unity_translations(
         if not tr:
             continue
         by_key[e.key] = tr
+        by_src_text[e.text] = tr
         tname = e.location_meta.get("table_name", "")
         if "row_id" in e.location_meta:
-            # Strip language suffix from StringTable asset name (e.g. Dialogue_en -> Dialogue)
             base_tname = re.sub(r"[_-](?:en|fr|es|de|pl|pt|it|ja|ko|ru|zh|vi)(?:-[A-Za-z]+)?$", "", tname, flags=re.IGNORECASE)
             by_table_row[(base_tname, e.location_meta["row_id"])] = tr
             by_table_row[(tname, e.location_meta["row_id"])] = tr
+
+    ta_by_file: Dict[str, List[Dict[str, Any]]] = {}
+    for ta_meta in inject_slot_info.get("text_assets", []):
+        ta_by_file.setdefault(str(Path(ta_meta["file"]).resolve()), []).append(ta_meta)
 
     catalog_path = _find_catalog_bin(root)
     files_to_backup = [str(f) for f in target_files]
@@ -1278,17 +2617,33 @@ def apply_unity_translations(
             continue
         old_size = tf.stat().st_size
         env = UnityPy.load(io.BytesIO(tf.read_bytes()))
+        is_bundle = isinstance(env.file, BundleFile)
         changed_file = False
+        resolved_tf = str(tf.resolve())
+        ta_targets = ta_by_file.get(resolved_tf, [])
+        ta_by_pid = {t["path_id"]: t for t in ta_targets}
+        ta_by_name = {t["name"]: t for t in ta_targets if t.get("name")}
+        sf_ver = getattr(getattr(env.file, "header", None), "version", 22)
 
         for obj in env.objects:
+            if obj.type.name == "TextAsset" and ta_targets:
+                ta = obj.read()
+                ta_meta = ta_by_pid.get(obj.path_id) or ta_by_name.get(getattr(ta, "m_Name", ""))
+                if ta_meta:
+                    cnt = _patch_text_asset_script(ta, ta_meta, source_entries, by_key, by_src_text)
+                    if cnt > 0:
+                        updated_count += cnt
+                        changed_file = True
+                continue
+
             if obj.type.name != "MonoBehaviour":
                 continue
             try:
                 tree = obj.read_typetree()
             except Exception:
-                continue
+                tree = None
 
-            if _is_i2_language_source(tree):
+            if tree is not None and _is_i2_language_source(tree):
                 src = tree.get("mSource", tree)
                 langs = src.get("mLanguages", [])
                 terms = src.get("mTerms", [])
@@ -1317,7 +2672,7 @@ def apply_unity_translations(
                     obj.save_typetree(tree)
                     changed_file = True
 
-            elif _is_unity_string_table(tree):
+            elif tree is not None and _is_unity_string_table(tree):
                 tname = str(tree.get("m_Name") or tf.stem)
                 base_tname = re.sub(r"[_-](?:en|fr|es|de|pl|pt|it|ja|ko|ru|zh|vi)(?:-[A-Za-z]+)?$", "", tname, flags=re.IGNORECASE)
                 rows = tree.get("m_TableData", [])
@@ -1333,16 +2688,55 @@ def apply_unity_translations(
                     obj.save_typetree(tree)
                     changed_file = True
 
+            else:
+                # Raw binary fallback for stripped TypeTree Unity IL2CPP assets
+                obj_sf_ver = getattr(getattr(obj.assets_file, "header", None), "version", sf_ver)
+                raw_bytes = obj.get_raw_data()
+                i2_bin = _parse_binary_i2_source(raw_bytes, obj_sf_ver)
+                if i2_bin:
+                    idx = target_lang_idx
+                    if idx is None:
+                        for i, l in enumerate(i2_bin["languages"]):
+                            if normalize_lang_token(l.get("Code") or l.get("Name") or "") == target_slot_code:
+                                idx = i
+                                break
+                    if idx is not None:
+                        patched_raw, cnt = _patch_binary_i2_source(raw_bytes, obj_sf_ver, idx, by_key)
+                        if cnt > 0:
+                            obj.set_raw_data(patched_raw)
+                            updated_count += cnt
+                            changed_file = True
+                    continue
+
+                st_bin = _parse_binary_string_table(raw_bytes, obj_sf_ver)
+                if st_bin:
+                    tname = st_bin.get("m_Name") or tf.stem
+                    base_tname = re.sub(r"[_-](?:en|fr|es|de|pl|pt|it|ja|ko|ru|zh|vi)(?:-[A-Za-z]+)?$", "", tname, flags=re.IGNORECASE)
+                    updates_by_rid: Dict[int, str] = {}
+                    for row in st_bin["rows"]:
+                        rid = int(row["m_Id"])
+                        tr = by_table_row.get((base_tname, rid)) or by_table_row.get((tname, rid))
+                        if tr:
+                            updates_by_rid[rid] = tr
+                    if updates_by_rid:
+                        patched_raw, cnt = _patch_binary_string_table(raw_bytes, obj_sf_ver, updates_by_rid)
+                        if cnt > 0:
+                            obj.set_raw_data(patched_raw)
+                            updated_count += cnt
+                            changed_file = True
+
         if changed_file:
-            out_bytes = env.file.save(packer="lz4")
+            out_bytes = env.file.save(packer="lz4") if is_bundle else env.file.save()
             del env
             gc.collect()
             atomic_write_bytes(tf, out_bytes)
             new_size = len(out_bytes)
-            bundle_updates.append((tf.name, old_size, new_size))
+            if is_bundle:
+                bundle_updates.append((tf.name, old_size, new_size))
         else:
             del env
-            bundle_updates.append((tf.name, old_size, old_size))
+            if is_bundle:
+                bundle_updates.append((tf.name, old_size, old_size))
 
     label_renamed = False
     if is_piggyback:

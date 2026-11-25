@@ -118,7 +118,7 @@ _tray_balloon_shown: bool = False
 _instance_mutex_handle: Optional[int] = None
 
 _APP_TITLE = "Black Sakura Translate"
-_APP_VERSION = "1.0.1"
+_APP_VERSION = "1.0.2"
 _GITHUB_REPO = "hohieu112007-byte/black-sakura-translate"
 _GITHUB_RELEASES_API = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
 _GITHUB_RELEASES_PAGE = f"https://github.com/{_GITHUB_REPO}/releases"

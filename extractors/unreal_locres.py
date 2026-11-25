@@ -276,6 +276,87 @@ def _run_tool(cmd: List[str], cwd: Optional[Path] = None) -> subprocess.Complete
     )
 
 
+def _read_pak_file_bytes(pak_path: Path, internal_rel: str) -> Optional[bytes]:
+    """Read a single file from an Unreal .pak via `repak get` with `repak unpack -f -i` fallback."""
+    if not DEFAULT_REPAK.exists() or not pak_path.exists():
+        return None
+    from core import hidden_subprocess_kwargs
+
+    rel = internal_rel.strip().strip('"').replace("\\", "/").lstrip("/")
+    if not rel:
+        return None
+
+    # 1. Primary: `repak get <pak> <internal_path>` directly to stdout (binary mode)
+    try:
+        proc = subprocess.run(
+            [str(DEFAULT_REPAK), "get", str(pak_path), rel],
+            capture_output=True,
+            timeout=60,
+            **hidden_subprocess_kwargs(),
+        )
+        if proc.returncode == 0 and proc.stdout:
+            return proc.stdout
+    except Exception as exc:
+        logger.debug("repak get failed on %s (%s): %s", pak_path.name, rel, exc)
+
+    # 2. Fallback: `repak unpack -f -i <pattern> -o <out_dir> <pak>`
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            _run_tool([str(DEFAULT_REPAK), "unpack", "-f", "-i", rel, "-o", str(out_dir), str(pak_path)])
+            candidate = out_dir / rel
+            if not candidate.exists():
+                matches = list(out_dir.rglob(Path(rel).name))
+                candidate = matches[0] if matches else candidate
+            if candidate.exists() and candidate.is_file():
+                return candidate.read_bytes()
+    except Exception as exc:
+        logger.debug("repak unpack fallback failed on %s (%s): %s", pak_path.name, rel, exc)
+    return None
+
+
+def _detect_pak_version(pak_path: Path) -> Optional[str]:
+    """Inspect .pak header version via `repak info` so mod paks match the target engine version."""
+    if not DEFAULT_REPAK.exists() or not pak_path.exists():
+        return None
+    try:
+        proc = _run_tool([str(DEFAULT_REPAK), "info", str(pak_path)])
+        if proc.returncode == 0:
+            m = re.search(r"\b(V\d+[AB]?)\b", proc.stdout or "")
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def diagnose_unreal_empty_scan(game_dir: str | Path) -> Optional[str]:
+    """Return a clear Vietnamese explanation when an Unreal game has 0 readable .locres slots."""
+    root = Path(game_dir)
+    utocs = list(root.rglob("*.utoc"))
+    paks = [p for p in root.rglob("*.pak") if p.parent.name.lower() != "~mods"]
+    if utocs and not paks:
+        return "Unreal Engine (dữ liệu đóng gói UE5 IoStore .utoc/.ucas — chưa có file .locres rời hoặc trong .pak)"
+    if paks and not DEFAULT_REPAK.exists():
+        return "Unreal Engine (chưa tải công cụ repak.exe — mở Cài đặt nâng cao để tải Tools)"
+    if paks and DEFAULT_REPAK.exists():
+        aes_blocked = False
+        for pak in paks[:4]:
+            try:
+                proc = _run_tool([str(DEFAULT_REPAK), "list", str(pak)])
+                err = (proc.stderr or "") + "\n" + (proc.stdout or "")
+                if proc.returncode != 0 and any(tok in err.lower() for tok in ("aes", "encrypt", "key")):
+                    aes_blocked = True
+                    break
+            except Exception:
+                pass
+        if aes_blocked:
+            return "Unreal Engine (.pak được mã hóa AES — chưa hỗ trợ giải mã tự động)"
+        if utocs:
+            return "Unreal Engine (dữ liệu đóng gói UE5 IoStore .utoc/.ucas — chưa có file .locres rời hoặc trong .pak)"
+    return None
+
+
 def scan_unreal_localization(game_dir: str | Path) -> List[Dict[str, Any]]:
     """Scan loose Content/Localization/*/<lang>/*.locres OR Unreal .pak indexes via repak.exe."""
     root = Path(game_dir)
@@ -318,7 +399,7 @@ def scan_unreal_localization(game_dir: str | Path) -> List[Dict[str, Any]]:
                 if proc.returncode != 0:
                     continue
                 for line in proc.stdout.splitlines():
-                    rel = line.strip().strip('"').replace("\\", "/")
+                    rel = line.strip().strip('"').replace("\\", "/").lstrip("/")
                     if rel.lower().endswith(".locres"):
                         parts = [p for p in rel.split("/") if p]
                         lang_dir = parts[-2] if len(parts) >= 2 else "en"
@@ -335,10 +416,28 @@ def scan_unreal_localization(game_dir: str | Path) -> List[Dict[str, Any]]:
                             },
                         )
                         slot["pak_entries"].append({"pak_path": str(pak), "internal_path": rel})
-                        if slot["count"] == 0:
-                            slot["count"] += 100
             except Exception as exc:
                 logger.debug("repak list failed on %s: %s", pak, exc)
+
+        # Populate accurate entry counts quickly for slots discovered inside .pak
+        for slot in slots.values():
+            pak_entries = slot.get("pak_entries", [])
+            if not pak_entries or slot["count"] > 0:
+                continue
+            if len(pak_entries) <= 15:
+                real_count = 0
+                for item in pak_entries:
+                    raw = _read_pak_file_bytes(Path(item["pak_path"]), item["internal_path"])
+                    if not raw:
+                        continue
+                    try:
+                        parsed = parse_locres_bytes_python(raw)
+                        real_count += sum(len(ns["keys"]) for ns in parsed["namespaces"])
+                    except Exception:
+                        pass
+                slot["count"] = real_count if real_count > 0 else 100
+            else:
+                slot["count"] = 100
 
     return list(slots.values())
 
@@ -373,10 +472,43 @@ def extract_unreal_slot_entries(game_dir: str | Path, slot_info: Dict[str, Any])
     entries: List[LocEntry] = []
     code = slot_info["slot_id"]
 
-    # Helper to parse one .locres file path
-    def _consume_locres_file(fpath: Path, origin_pak: Optional[str] = None, internal_rel: Optional[str] = None) -> None:
-        raw = fpath.read_bytes()
+    def _consume_locres_bytes(
+        raw: bytes,
+        fname: str,
+        origin_pak: Optional[str] = None,
+        internal_rel: Optional[str] = None,
+        fpath_str: str = "",
+    ) -> None:
         parsed = parse_locres_bytes_python(raw)
+        if not parsed.get("namespaces") and DEFAULT_UNREAL_LOCRES.exists():
+            with tempfile.TemporaryDirectory() as tmp_u:
+                tmp_loc = Path(tmp_u) / fname
+                tmp_loc.write_bytes(raw)
+                rows = _extract_locres_with_unreallocres(tmp_loc)
+                if rows:
+                    for idx, (k, src, tgt) in enumerate(rows):
+                        val = tgt or src
+                        if not is_translatable_string(val):
+                            continue
+                        entries.append(
+                            LocEntry(
+                                entry_id=f"ue::{fname}::{k or idx}",
+                                key=k or f"UE_{idx}",
+                                text=val,
+                                file_path=origin_pak or fpath_str,
+                                lang=code,
+                                fmt="unreal_locres",
+                                category=classify_entry_category(k or "", val),
+                                location_meta={
+                                    "namespace": "",
+                                    "locres_key": k or f"UE_{idx}",
+                                    "internal_path": internal_rel or "",
+                                    "raw_locres_path": fpath_str,
+                                },
+                            )
+                        )
+                    return
+
         for ns in parsed["namespaces"]:
             ns_name = ns["namespace"]
             for k in ns["keys"]:
@@ -387,10 +519,10 @@ def extract_unreal_slot_entries(game_dir: str | Path, slot_info: Dict[str, Any])
                 cat = classify_entry_category(full_key, val)
                 entries.append(
                     LocEntry(
-                        entry_id=f"ue::{fpath.name}::{full_key}",
+                        entry_id=f"ue::{fname}::{full_key}",
                         key=full_key,
                         text=val,
-                        file_path=origin_pak or str(fpath),
+                        file_path=origin_pak or fpath_str,
                         lang=code,
                         fmt="unreal_locres",
                         category=cat,
@@ -398,7 +530,7 @@ def extract_unreal_slot_entries(game_dir: str | Path, slot_info: Dict[str, Any])
                             "namespace": ns_name,
                             "locres_key": k["key"],
                             "internal_path": internal_rel or "",
-                            "raw_locres_path": str(fpath),
+                            "raw_locres_path": fpath_str,
                         },
                     )
                 )
@@ -406,25 +538,17 @@ def extract_unreal_slot_entries(game_dir: str | Path, slot_info: Dict[str, Any])
     for fp in slot_info.get("files", []):
         p = Path(fp)
         if p.exists():
-            _consume_locres_file(p)
+            _consume_locres_bytes(p.read_bytes(), p.name, fpath_str=str(p))
 
-    # Extract pak_entries into temporary directory via repak
+    # Extract pak_entries directly via repak get / unpack -f -i
     pak_entries = slot_info.get("pak_entries", [])
     if pak_entries and DEFAULT_REPAK.exists():
-        with tempfile.TemporaryDirectory() as tmpdir:
-            for item in pak_entries:
-                pak_path = Path(item["pak_path"])
-                rel = item["internal_path"]
-                out_dir = Path(tmpdir) / pak_path.stem
-                out_dir.mkdir(parents=True, exist_ok=True)
-                _run_tool([str(DEFAULT_REPAK), "unpack", "-f", rel, "-o", str(out_dir), str(pak_path)])
-                # Locate extracted .locres
-                candidate = out_dir / rel.lstrip("/")
-                if not candidate.exists():
-                    matches = list(out_dir.rglob(Path(rel).name))
-                    candidate = matches[0] if matches else candidate
-                if candidate.exists():
-                    _consume_locres_file(candidate, origin_pak=str(pak_path), internal_rel=rel)
+        for item in pak_entries:
+            pak_path = Path(item["pak_path"])
+            rel = item["internal_path"].lstrip("/")
+            raw = _read_pak_file_bytes(pak_path, rel)
+            if raw:
+                _consume_locres_bytes(raw, Path(rel).name, origin_pak=str(pak_path), internal_rel=rel)
 
     return entries
 
@@ -481,22 +605,17 @@ def apply_unreal_translations(
             if backup_cb:
                 backup_cb([], [str(mod_pak_path)])
 
+        pak_ver = _detect_pak_version(Path(pak_entries[0]["pak_path"]))
         with tempfile.TemporaryDirectory() as tmpdir:
             stage_root = Path(tmpdir) / "pak_stage"
             stage_root.mkdir(parents=True, exist_ok=True)
             for item in pak_entries:
                 pak_path = Path(item["pak_path"])
                 rel = item["internal_path"].lstrip("/")
-                extract_tmp = Path(tmpdir) / "extract"
-                extract_tmp.mkdir(parents=True, exist_ok=True)
-                _run_tool([str(DEFAULT_REPAK), "unpack", "-f", rel, "-o", str(extract_tmp), str(pak_path)])
-                src_loc = extract_tmp / rel
-                if not src_loc.exists():
-                    matches = list(extract_tmp.rglob(Path(rel).name))
-                    src_loc = matches[0] if matches else src_loc
-                if not src_loc.exists():
+                raw_src = _read_pak_file_bytes(pak_path, rel)
+                if not raw_src:
                     continue
-                parsed = parse_locres_bytes_python(src_loc.read_bytes())
+                parsed = parse_locres_bytes_python(raw_src)
                 patched_bytes = write_locres_bytes_python(parsed, updates_by_ns_key)
                 dest_loc = stage_root / rel
                 dest_loc.parent.mkdir(parents=True, exist_ok=True)
@@ -504,7 +623,17 @@ def apply_unreal_translations(
                 updated += sum(
                     1 for ns in parsed["namespaces"] for k in ns["keys"] if (ns["namespace"], k["key"]) in updates_by_ns_key
                 )
-            _run_tool([str(DEFAULT_REPAK), "pack", str(stage_root), str(mod_pak_path)])
+            cmd = [str(DEFAULT_REPAK), "pack", "--quiet"]
+            if pak_ver:
+                cmd.extend(["--version", pak_ver])
+            cmd.extend([str(stage_root), str(mod_pak_path)])
+            proc_pack = _run_tool(cmd)
+            if proc_pack.returncode != 0 or not mod_pak_path.exists():
+                return {
+                    "ok": False,
+                    "updated": 0,
+                    "error": f"repak pack thất bại: {(proc_pack.stderr or proc_pack.stdout or '').strip()}",
+                }
 
         return {
             "ok": mod_pak_path.exists(),
