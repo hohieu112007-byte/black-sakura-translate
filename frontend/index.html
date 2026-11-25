@@ -185,10 +185,9 @@
             </div>
           </div>
           <div class="action-strip-right">
-            <button id="btnOpenSavedQuick" type="button" class="btn btn-ghost btn-sm" title="Mở Kho bản dịch &amp; Xuất/Nhập .sakugapack" data-i18n="btn_saved_quick">📦 Kho dịch</button>
             <button id="btnFixErrors" class="btn btn-warn-outline btn-sm" title="Dọn &lt;think&gt;, sửa thẻ tag hỏng, dịch lại câu lỗi, đồng bộ catalog.bin &amp; chống đen màn hình Steam" data-i18n="btn_fix_errors">🛠 Fix lỗi</button>
             <button id="btnQuickRestore" class="btn btn-ghost btn-sm" title="Khôi phục 100% file gốc" data-i18n="btn_restore">↺ Khôi phục gốc</button>
-            <button id="btnOpenSettingsDrawer" class="btn btn-outline btn-sm" title="Mở toàn bộ cài đặt chi tiết" data-i18n="btn_settings_slot">⚙ Cài đặt &amp; Slot ▾</button>
+            <button id="btnOpenSettingsDrawer" class="btn btn-outline btn-sm" title="Mở toàn bộ cài đặt nâng cao (Slot, Dual-Model, Văn phong, AI...)" data-i18n="btn_settings_slot">⚙ Cài đặt nâng cao</button>
           </div>
         </div>
 
@@ -228,33 +227,42 @@
           <p id="gameUpdateDesc" class="mono-mini" style="margin:0;"></p>
         </div>
 
-        <!-- Steam Sub-Navigation Tabs (4 Clean Tabs) -->
-        <div class="steam-subtabs">
-          <button class="subtab active" data-subtab="overview" data-i18n="tab_overview">Cơ bản (Dịch nhanh)</button>
-          <button class="subtab" data-subtab="live" data-i18n="tab_live">Bảng Dịch &amp; Từ điển</button>
-          <button class="subtab" data-subtab="saved" data-i18n="tab_saved">Kho bản dịch &amp; An toàn</button>
-          <button class="subtab" data-subtab="settings" data-i18n="tab_settings">Cài đặt đầy đủ</button>
+        <!-- One-click Re-apply Skill Banner when editing/changing Skill on a translated game -->
+        <div id="reapplySkillBanner" class="reapply-skill-banner reapply-top-banner hidden">
+          <div class="reapply-text">
+            <strong data-i18n="reapply_title">🔄 Bạn vừa đổi / cập nhật Skill Văn Phong cho game đã dịch:</strong>
+            <span class="mono-mini" data-i18n="reapply_desc">Chọn cách áp dụng lại Skill mới (mọi câu bạn đã sửa tay được giữ an toàn 100%).</span>
+          </div>
+          <div class="reapply-actions">
+            <button id="btnReapplyFlagged" type="button" class="btn btn-sm btn-outline" data-i18n="btn_reapply_flagged">🔄 Chỉ dịch lại câu lỗi</button>
+            <button id="btnReapplySub" type="button" class="btn btn-sm btn-outline" data-i18n="btn_reapply_sub">📖 Dịch lại Cốt truyện/Sub</button>
+            <button id="btnReapplyAll" type="button" class="btn btn-sm btn-warn-outline" data-i18n="btn_reapply_all">⚡ Dịch lại toàn bộ</button>
+          </div>
         </div>
 
-        <!-- SUBTAB 1: MINIMALIST ESSENTIALS (DEFAULT!) -->
+        <!-- Steam Sub-Navigation Tabs (4 Clean Tabs) -->
+        <div class="steam-subtabs">
+          <button class="subtab active" data-subtab="overview" data-i18n="tab_overview">Dịch nhanh</button>
+          <button class="subtab" data-subtab="live" data-i18n="tab_live">Bảng Dịch &amp; Từ điển</button>
+          <button class="subtab" data-subtab="saved" data-i18n="tab_saved">Kho bản dịch &amp; An toàn</button>
+          <button class="subtab" data-subtab="settings" data-i18n="tab_settings">⚙ Cài đặt nâng cao</button>
+        </div>
+
+        <!-- SUBTAB 1: ULTRA-CLEAN SIMPLE QUICK SETUP -->
         <div id="paneOverview" class="subtab-pane active">
           <div class="overview-grid">
-            <!-- Left Minimalist Card: Friendly Step-by-Step Basic Config -->
-            <div class="panel-card">
+            <!-- Left Card: Essential Simple Controls Only -->
+            <div class="panel-card quick-setup-card">
               <div class="card-header">
                 <div class="header-title-with-tip">
-                  <span class="section-label" data-i18n="basic_cfg_title">CẤU HÌNH CƠ BẢN</span>
+                  <span class="section-label" data-i18n="basic_cfg_title">THIẾT LẬP NHANH</span>
                   <span id="cfgSavedPill" class="cfg-saved-pill" title="Mọi thay đổi được tự động lưu riêng cho từng game">✓ Tự nhớ</span>
                 </div>
-                <button id="btnLinkToFullSettings" type="button" class="btn btn-ghost btn-sm cfg-link-btn" data-i18n="btn_custom_slot_scope">⚙ Cài đặt đầy đủ ➔</button>
+                <span class="tier-model-chip" title="Model AI Local đang chạy">🤖 <span id="activeModelShortLabel">AI Local</span></span>
               </div>
 
-              <!-- Step 1: Language Pair + Inject Slot Surface (Mirrors Full Settings) -->
+              <!-- Step 1: Language Pair + Compact 1-Line Inject Slot -->
               <div class="lang-slot-box">
-                <div class="step-heading">
-                  <span class="step-num">1</span>
-                  <span class="step-title" data-i18n="step1_lang_title">Chọn ngôn ngữ dịch &amp; chỗ chèn trong game</span>
-                </div>
                 <div class="basic-lang-bar">
                   <div class="basic-lang-item">
                     <label for="selectSourceLang" data-i18n="lbl_src_lang">Ngôn ngữ gốc</label>
@@ -286,35 +294,31 @@
                   </div>
                 </div>
 
-                <div class="auto-slot-strip">
+                <div class="auto-slot-strip compact-slot-strip">
                   <div class="auto-slot-main">
-                    <div class="auto-slot-meta">
-                      <span class="auto-slot-lbl" data-i18n="lbl_rec_slot">Slot chèn vào game</span>
-                      <span id="activeSlotBadge" class="slot-badge rec">★ ĐỀ XUẤT</span>
-                    </div>
                     <div class="auto-slot-val-row">
-                      <span id="activeSlotSummary" class="auto-slot-val" data-i18n="slot_auto_loading">Tự động chọn slot tốt nhất...</span>
+                      <span class="auto-slot-lbl" data-i18n="lbl_rec_slot">Chèn vào:</span>
+                      <span id="activeSlotSummary" class="auto-slot-val" data-i18n="slot_auto_loading">Đang chọn...</span>
+                      <span id="activeSlotBadge" class="slot-badge rec">★ ĐỀ XUẤT</span>
                       <span id="activeSlotHint" class="auto-slot-hint"></span>
                     </div>
                   </div>
-                  <button id="btnToggleSlotDrawer" type="button" class="btn btn-outline btn-sm" aria-expanded="false">
-                    <span data-i18n="btn_change_slot">Đổi Slot</span> <span id="slotDrawerChevron">▾</span>
+                  <button id="btnToggleSlotDrawer" type="button" class="btn btn-ghost btn-sm compact-slot-btn" aria-expanded="false">
+                    <span data-i18n="btn_change_slot">Đổi</span> <span id="slotDrawerChevron">▾</span>
                   </button>
                 </div>
 
-                <!-- Inline Quick Slot Picker (Same cards as Full Settings) -->
+                <!-- Inline Quick Slot Picker (Hidden unless user clicks "Đổi") -->
                 <div id="inlineSlotCollapse" class="inline-collapse hidden">
                   <div id="slotCardsGridQuick" class="slot-cards-grid"></div>
                 </div>
               </div>
 
-              <!-- Step 2: 3-Tier Preset Cards (Compact Pill Grid, synced with Full Settings) -->
+              <!-- Step 2: 3-Tier Preset Cards -->
               <div class="tier-header">
                 <div class="header-title-with-tip">
-                  <span class="step-num">2</span>
-                  <span class="section-label" data-i18n="tier_title">CHỌN MỨC ĐỘ DỊCH</span>
-                  <sakuga-tooltip text="Chọn 1 thẻ để tự cấu hình Phạm vi &amp; AI (giữ nguyên Slot đã chọn và tự lưu cho game này)." label="Giải thích 3 mức độ">?</sakuga-tooltip>
-                  <span class="tier-model-chip" title="Model AI Local đang chạy">🤖 <span id="activeModelShortLabel">AI Local</span></span>
+                  <span class="section-label" data-i18n="tier_title">MỨC ĐỘ DỊCH</span>
+                  <sakuga-tooltip text="Chọn 1 thẻ để tự cấu hình Phạm vi &amp; AI. Cần chỉnh chi tiết hơn thì mở Cài đặt nâng cao." label="Giải thích 3 mức độ">?</sakuga-tooltip>
                 </div>
                 <span id="activePresetBadge" class="badge">CẤP 2 • CÂN BẰNG</span>
               </div>
@@ -335,7 +339,7 @@
                     <span class="preset-eta-pill" id="estTimeBALANCED">⏱ ~--</span>
                   </div>
                   <h3 data-i18n="tier_bal_name">Cân Bằng</h3>
-                  <p data-i18n="tier_bal_desc">Khuyên dùng • Lập từ điển + giữ nguyên tên nhân vật.</p>
+                  <p data-i18n="tier_bal_desc">Khuyên dùng • Tự lập từ điển &amp; giữ tên nhân vật.</p>
                 </div>
 
                 <div class="preset-card" id="presetCardDEEP_STORY" data-preset="DEEP_STORY" tabindex="0">
@@ -348,7 +352,7 @@
                 </div>
               </div>
 
-              <!-- Friendly Quick Protection Toggles (Synced 1-to-1 with Full Settings) -->
+              <!-- 2 Essential Safety Toggles -->
               <div class="quick-guard-strip">
                 <button type="button" id="btnQuickGuardNames" class="guard-chip active" aria-pressed="true" title="Tự khóa tên nhân vật &amp; người nói để AI không dịch nhầm tên riêng">
                   <span class="guard-ico">🛡</span>
@@ -362,70 +366,14 @@
                 </button>
               </div>
 
-              <!-- Dual-Model Speed & Quality Control Card -->
-              <div id="dualModelQuickBar" class="dual-model-quick-bar">
-                <div class="dual-quick-head">
-                  <div class="dual-quick-info">
-                    <div class="dual-quick-title-row">
-                      <span class="section-label" data-i18n="dual_title">⚡ DUAL-MODEL TĂNG TỐC</span>
-                      <span id="dualModeStatusBadge" class="badge">TẮT (1 Model)</span>
-                    </div>
-                    <div id="dualModeExplainText" class="mono-mini" data-i18n="dual_desc">Quét nhanh nút Menu bằng Model nhẹ • Giữ 100% chất lượng Thoại bằng Model chính.</div>
-                  </div>
-                  <div class="dual-quick-actions">
-                    <button id="btnConfigDualModels" type="button" class="btn btn-ghost btn-sm" title="Chọn Model nhẹ cho UI &amp; Model chính cho Cốt truyện" data-i18n="dual_btn_cfg">⚙ Đổi Model</button>
-                    <sakuga-toggle id="chkDualModelQuick" label="Bật Dual-Model"></sakuga-toggle>
-                  </div>
+              <!-- Single Entry Bar to All Advanced Settings -->
+              <button id="btnLinkToFullSettings" type="button" class="adv-entry-bar">
+                <div class="adv-entry-left">
+                  <strong data-i18n="btn_custom_slot_scope">⚙ Cài đặt nâng cao</strong>
+                  <span class="mono-mini" data-i18n="adv_entry_sub">Dual-Model • Văn phong &amp; Bối cảnh • Phạm vi dịch • Slot &amp; Hệ thống</span>
                 </div>
-                <div id="dualModelPairStrip" class="dual-quick-pair">
-                  <span class="dual-pair-chip chip-ui"><span data-i18n="dual_chip_ui">⚡ UI nhanh:</span> <strong id="lblUiFastModelName">qwen3:1.7b</strong></span>
-                  <span class="dual-pair-arrow">➔</span>
-                  <span class="dual-pair-chip chip-main"><span data-i18n="dual_chip_main">📖 Thoại chuẩn:</span> <strong id="lblMainStoryModelName">qwen3.5:4b</strong></span>
-                </div>
-              </div>
-
-              <!-- Compact Collapsible Game Context & 2-Layer Skill Hub (Collapsed by default) -->
-              <div class="context-style-box collapsed">
-                <div class="context-style-head" id="btnToggleContextDrawer" role="button" tabindex="0">
-                  <div class="context-head-left">
-                    <span class="section-label" data-i18n="skill_box_title">SKILL &amp; VĂN PHONG</span>
-                    <span id="summaryBridgePill" class="bridge-pill-mini">Auto Bridge</span>
-                    <span id="activeToneBadge" class="badge">Chuẩn Tự Nhiên</span>
-                    <span id="compiledStyleBadge" class="kv-pill hidden">KV Style Card ✓</span>
-                  </div>
-                  <div class="context-head-actions">
-                    <button id="btnFetchSteamContext" type="button" class="btn btn-ghost btn-sm" title="Kéo lại mô tả &amp; thể loại từ Steam Store">↻ Steam</button>
-                    <span class="mono-mini context-toggle-hint" data-i18n="skill_change_hint">Đổi văn phong</span>
-                    <span id="contextChevron" class="mono-mini">▸</span>
-                  </div>
-                </div>
-                <div id="contextDrawerBody" class="context-drawer-body hidden">
-                  <div class="lang-bridge-strip">
-                    <span class="lang-bridge-meta"><span data-i18n="lbl_lang_bridge">🌉 Cầu Ngôn Ngữ:</span> <strong id="activeLangBridgeLabel">Auto Bridge</strong></span>
-                    <select id="selectLangBridgeOverride" class="select-compact select-bridge" title="Chọn Cầu Ngôn Ngữ Lớp 1"></select>
-                  </div>
-                  <div class="skill-bar-wrap">
-                    <div id="tonePresetBar" class="tone-preset-row"></div>
-                    <button id="btnQuickCreateSkill" type="button" class="tone-pill tone-pill-add" data-i18n="btn_create_skill_quick">+ Tạo Skill</button>
-                  </div>
-                  <div id="activeSkillHoverHint" class="mono-mini skill-hover-hint">Chọn Bộ Văn Phong (Lớp 2) — tự nạp cùng Cầu Ngôn Ngữ ở đỉnh KV-Cache.</div>
-                  <textarea id="txtGameContext" class="context-textarea" rows="3" placeholder="Dán cốt truyện, bối cảnh hoặc quy ước xưng hô riêng (VD: Nhân vật chính là lính đánh thuê lạnh lùng, xưng Tôi - Ngươi)..." data-i18n-placeholder="txt_context_ph"></textarea>
-                  <div id="compiledStylePreview" class="compiled-style-preview" data-i18n="compiled_preview_default">Pha 0 sẽ tự nén thành Style Card ≤ 4 dòng (KV-Cache Prefix) khi dịch.</div>
-                </div>
-              </div>
-
-              <!-- One-click Re-apply Skill Banner when editing/changing Skill on a translated game -->
-              <div id="reapplySkillBanner" class="reapply-skill-banner hidden">
-                <div class="reapply-text">
-                  <strong data-i18n="reapply_title">🔄 Bạn vừa đổi / cập nhật Skill Văn Phong cho game đã dịch:</strong>
-                  <span class="mono-mini" data-i18n="reapply_desc">Chọn cách áp dụng lại Skill mới (mọi câu bạn đã sửa tay được giữ an toàn 100%).</span>
-                </div>
-                <div class="reapply-actions">
-                  <button id="btnReapplyFlagged" type="button" class="btn btn-sm btn-outline" data-i18n="btn_reapply_flagged">🔄 Chỉ dịch lại câu lỗi</button>
-                  <button id="btnReapplySub" type="button" class="btn btn-sm btn-outline" data-i18n="btn_reapply_sub">📖 Dịch lại Cốt truyện/Sub</button>
-                  <button id="btnReapplyAll" type="button" class="btn btn-sm btn-warn-outline" data-i18n="btn_reapply_all">⚡ Dịch lại toàn bộ</button>
-                </div>
-              </div>
+                <span class="adv-entry-arrow" aria-hidden="true">➔</span>
+              </button>
             </div>
 
             <!-- Right Minimalist Card: Live Progress & Latest Subtitles Preview -->
@@ -554,124 +502,183 @@
           </details>
         </div>
 
-        <!-- SUBTAB 4: FULL ADVANCED SETTINGS (Steam Properties Style) -->
+        <!-- SUBTAB 4: ONE UNIFIED ADVANCED SETTINGS HUB -->
         <div id="paneSettings" class="subtab-pane">
           <div class="settings-two-col">
-            <div class="panel-card">
-              <div class="card-header">
-                <span class="section-label" data-i18n="set_slot_title">1. NGÔN NGỮ &amp; SLOT CHÈN FILE</span>
-                <button id="btnRescanGame" type="button" class="btn btn-ghost btn-sm" data-i18n="btn_rescan">↻ Quét lại game</button>
-              </div>
-
-              <!-- Synced Language Pair (Identical to Basic Config) -->
-              <div class="basic-lang-bar settings-lang-bar">
-                <div class="basic-lang-item">
-                  <label for="selectSourceLangSettings" data-i18n="lbl_src_lang">Ngôn ngữ gốc</label>
-                  <select id="selectSourceLangSettings" class="select-full"></select>
+            <div class="settings-col-stack">
+              <!-- Group 1: Languages & Inject Slot -->
+              <div class="panel-card">
+                <div class="card-header">
+                  <span class="section-label" data-i18n="set_slot_title">1. NGÔN NGỮ &amp; SLOT CHÈN FILE</span>
+                  <button id="btnRescanGame" type="button" class="btn btn-ghost btn-sm" data-i18n="btn_rescan">↻ Quét lại game</button>
                 </div>
-                <div class="pair-arrow" aria-hidden="true">➔</div>
-                <div class="basic-lang-item">
-                  <label for="selectTargetLangSettings" data-i18n="lbl_tgt_lang">Dịch sang</label>
-                  <select id="selectTargetLangSettings" class="select-full"></select>
+
+                <!-- Synced Language Pair -->
+                <div class="basic-lang-bar settings-lang-bar">
+                  <div class="basic-lang-item">
+                    <label for="selectSourceLangSettings" data-i18n="lbl_src_lang">Ngôn ngữ gốc</label>
+                    <select id="selectSourceLangSettings" class="select-full"></select>
+                  </div>
+                  <div class="pair-arrow" aria-hidden="true">➔</div>
+                  <div class="basic-lang-item">
+                    <label for="selectTargetLangSettings" data-i18n="lbl_tgt_lang">Dịch sang</label>
+                    <select id="selectTargetLangSettings" class="select-full"></select>
+                  </div>
+                </div>
+
+                <div class="settings-divider" style="margin:10px 0;"></div>
+
+                <div id="dedupStatsBanner" class="stats-row" style="margin-bottom:10px;">
+                  <span class="stat-chip"><span data-i18n="stat_raw_lbl">Tổng gốc:</span> <strong id="statRawCount">0</strong></span>
+                  <span class="stat-chip"><span data-i18n="stat_tm_lbl">TM 0ms:</span> <strong id="statTmHits">0</strong></span>
+                  <span class="stat-chip stat-fold hidden" id="statTemplateFoldChip"><span data-i18n="stat_fold_lbl">Gộp mẫu số:</span> <strong id="statFoldSaved">0</strong></span>
+                  <span class="stat-chip" id="studioEngineMethod">--</span>
+                </div>
+                <div class="control-block" style="margin-bottom:8px;">
+                  <label class="sub-label" data-i18n="lbl_rec_slot">Slot chèn vào game</label>
+                  <div id="slotCardsGrid" class="slot-cards-grid"></div>
+                </div>
+                <div id="slotGuideBox" class="slot-guide-box" style="margin-top:8px;" data-i18n="slot_guide_default">
+                  Chọn 1 slot ở trên để xem hướng dẫn bật ngôn ngữ trong Settings game.
                 </div>
               </div>
 
-              <div class="settings-divider" style="margin:10px 0;"></div>
-
-              <div id="dedupStatsBanner" class="stats-row" style="margin-bottom:10px;">
-                <span class="stat-chip"><span data-i18n="stat_raw_lbl">Tổng gốc:</span> <strong id="statRawCount">0</strong></span>
-                <span class="stat-chip"><span data-i18n="stat_tm_lbl">TM 0ms:</span> <strong id="statTmHits">0</strong></span>
-                <span class="stat-chip stat-fold hidden" id="statTemplateFoldChip"><span data-i18n="stat_fold_lbl">Gộp mẫu số:</span> <strong id="statFoldSaved">0</strong></span>
-                <span class="stat-chip" id="studioEngineMethod">--</span>
-              </div>
-              <div class="control-block" style="margin-bottom:8px;">
-                <label class="sub-label" data-i18n="lbl_rec_slot">Slot chèn vào game</label>
-                <div id="slotCardsGrid" class="slot-cards-grid"></div>
-              </div>
-              <div id="slotGuideBox" class="slot-guide-box" style="margin-top:8px;" data-i18n="slot_guide_default">
-                Chọn 1 slot ở trên để xem hướng dẫn bật ngôn ngữ trong Settings game.
+              <!-- Group 2: Style, Context & 2-Layer Skill Hub (Moved from Quick Setup!) -->
+              <div class="panel-card">
+                <div class="context-style-box adv-context-box">
+                  <div class="context-style-head" id="btnToggleContextDrawer" role="button" tabindex="0">
+                    <div class="context-head-left">
+                      <span class="section-label" data-i18n="skill_box_title">2. VĂN PHONG, BỐI CẢNH &amp; SKILL</span>
+                      <span id="summaryBridgePill" class="bridge-pill-mini">Auto Bridge</span>
+                      <span id="activeToneBadge" class="badge">Chuẩn Tự Nhiên</span>
+                      <span id="compiledStyleBadge" class="kv-pill hidden">KV Style Card ✓</span>
+                    </div>
+                    <div class="context-head-actions">
+                      <button id="btnFetchSteamContext" type="button" class="btn btn-ghost btn-sm" title="Kéo lại mô tả &amp; thể loại từ Steam Store">↻ Steam</button>
+                      <span id="contextChevron" class="mono-mini">▾</span>
+                    </div>
+                  </div>
+                  <div id="contextDrawerBody" class="context-drawer-body">
+                    <div class="lang-bridge-strip">
+                      <span class="lang-bridge-meta"><span data-i18n="lbl_lang_bridge">🌉 Cầu Ngôn Ngữ:</span> <strong id="activeLangBridgeLabel">Auto Bridge</strong></span>
+                      <select id="selectLangBridgeOverride" class="select-compact select-bridge" title="Chọn Cầu Ngôn Ngữ Lớp 1"></select>
+                    </div>
+                    <div class="skill-bar-wrap">
+                      <div id="tonePresetBar" class="tone-preset-row"></div>
+                      <button id="btnQuickCreateSkill" type="button" class="tone-pill tone-pill-add" data-i18n="btn_create_skill_quick">+ Tạo Skill</button>
+                    </div>
+                    <div id="activeSkillHoverHint" class="mono-mini skill-hover-hint">Chọn Bộ Văn Phong (Lớp 2) — tự nạp cùng Cầu Ngôn Ngữ ở đỉnh KV-Cache.</div>
+                    <textarea id="txtGameContext" class="context-textarea" rows="3" placeholder="Dán cốt truyện, bối cảnh hoặc quy ước xưng hô riêng (VD: Nhân vật chính là lính đánh thuê lạnh lùng, xưng Tôi - Ngươi)..." data-i18n-placeholder="txt_context_ph"></textarea>
+                    <div id="compiledStylePreview" class="compiled-style-preview" data-i18n="compiled_preview_default">Pha 0 sẽ tự nén thành Style Card ≤ 4 dòng (KV-Cache Prefix) khi dịch.</div>
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div class="panel-card">
-              <div class="card-header">
-                <span class="section-label" data-i18n="set_scope_ai_title">2. PHẠM VI DỊCH, AI ENGINE &amp; KHỞI CHẠY</span>
-                <span id="settingsPresetBadge" class="badge">CẤP 2 • CÂN BẰNG</span>
+            <div class="settings-col-stack">
+              <!-- Group 3: Scope, AI Engine & Dual-Model -->
+              <div class="panel-card">
+                <div class="card-header">
+                  <span class="section-label" data-i18n="set_scope_ai_title">3. PHẠM VI DỊCH &amp; ĐỘNG CƠ AI</span>
+                  <span id="settingsPresetBadge" class="badge">CẤP 2 • CÂN BẰNG</span>
+                </div>
+
+                <div class="control-block">
+                  <label class="sub-label" data-i18n="lbl_scope">Phạm vi dịch</label>
+                  <div id="scopeSegmented" class="segmented">
+                    <button class="seg-btn active" data-scope="FULL_PATCH" data-i18n="scope_full">Toàn bộ game</button>
+                    <button class="seg-btn" data-scope="SUB_ONLY" data-i18n="scope_sub">Chỉ Sub &amp; Cốt truyện</button>
+                    <button class="seg-btn" data-scope="UI_ONLY" data-i18n="scope_ui">Chỉ Giao diện UI</button>
+                  </div>
+                  <div id="subOptionsDrawer" class="sub-options hidden">
+                    <sakuga-checkbox id="chkTranslateChoices" checked data-i18n="chk_choices">Dịch lựa chọn hội thoại (Choices)</sakuga-checkbox>
+                  </div>
+                </div>
+
+                <div class="control-block">
+                  <label class="sub-label"><span data-i18n="lbl_ai_engine">Động cơ AI Local</span> (<span id="settingsActiveModelLabel">Ollama</span>)</label>
+                  <div id="aiModeSegmented" class="segmented">
+                    <button class="seg-btn" data-aimode="FLASH">Flash No-Think</button>
+                    <button class="seg-btn active" data-aimode="AUTO_HYBRID">Auto-Hybrid ★</button>
+                    <button class="seg-btn" data-aimode="DEEP_THINK">Deep-Think</button>
+                  </div>
+                </div>
+
+                <!-- Dual-Model Boost (Consolidated here — zero duplication!) -->
+                <div id="dualModelQuickBar" class="dual-model-quick-bar" style="margin-bottom:0;">
+                  <div class="dual-quick-head">
+                    <div class="dual-quick-info">
+                      <div class="dual-quick-title-row">
+                        <span class="section-label" data-i18n="dual_title">⚡ DUAL-MODEL TĂNG TỐC</span>
+                        <span id="dualModeStatusBadge" class="badge">TẮT (1 Model)</span>
+                      </div>
+                      <div id="dualModeExplainText" class="mono-mini" data-i18n="dual_desc">Quét nhanh nút Menu bằng Model nhẹ • Giữ 100% chất lượng Thoại bằng Model chính.</div>
+                    </div>
+                    <div class="dual-quick-actions">
+                      <button id="btnConfigDualModels" type="button" class="btn btn-ghost btn-sm" title="Chọn Model nhẹ cho UI &amp; Model chính cho Cốt truyện" data-i18n="dual_btn_cfg">⚙ Đổi Model</button>
+                      <sakuga-toggle id="chkDualModelQuick" label="Bật Dual-Model"></sakuga-toggle>
+                      <sakuga-toggle id="chkDualModelSettings" class="hidden" label="Dual-Model Local"></sakuga-toggle>
+                    </div>
+                  </div>
+                  <div id="dualModelPairStrip" class="dual-quick-pair">
+                    <span class="dual-pair-chip chip-ui"><span data-i18n="dual_chip_ui">⚡ UI nhanh:</span> <strong id="lblUiFastModelName">qwen3:1.7b</strong></span>
+                    <span class="dual-pair-arrow">➔</span>
+                    <span class="dual-pair-chip chip-main"><span data-i18n="dual_chip_main">📖 Thoại chuẩn:</span> <strong id="lblMainStoryModelName">qwen3.5:4b</strong></span>
+                  </div>
+                </div>
               </div>
 
-              <div class="control-block">
-                <label class="sub-label" data-i18n="lbl_scope">Phạm vi dịch</label>
-                <div id="scopeSegmented" class="segmented">
-                  <button class="seg-btn active" data-scope="FULL_PATCH" data-i18n="scope_full">Toàn bộ game</button>
-                  <button class="seg-btn" data-scope="SUB_ONLY" data-i18n="scope_sub">Chỉ Sub &amp; Cốt truyện</button>
-                  <button class="seg-btn" data-scope="UI_ONLY" data-i18n="scope_ui">Chỉ Giao diện UI</button>
+              <!-- Group 4: Protection, Launch & System -->
+              <div class="panel-card">
+                <div class="card-header">
+                  <span class="section-label" data-i18n="set_sys_title">4. BẢO VỆ, KHỞI CHẠY &amp; HỆ THỐNG</span>
                 </div>
-                <div id="subOptionsDrawer" class="sub-options hidden">
-                  <sakuga-checkbox id="chkTranslateChoices" checked data-i18n="chk_choices">Dịch lựa chọn hội thoại (Choices)</sakuga-checkbox>
-                </div>
-              </div>
 
-              <div class="control-block">
-                <label class="sub-label"><span data-i18n="lbl_ai_engine">Động cơ AI Local</span> (<span id="settingsActiveModelLabel">Ollama</span>)</label>
-                <div id="aiModeSegmented" class="segmented">
-                  <button class="seg-btn" data-aimode="FLASH">Flash No-Think</button>
-                  <button class="seg-btn active" data-aimode="AUTO_HYBRID">Auto-Hybrid ★</button>
-                  <button class="seg-btn" data-aimode="DEEP_THINK">Deep-Think</button>
+                <div class="settings-row">
+                  <div>
+                    <strong data-i18n="set_names_title">🛡 Chống dịch tên nhân vật (Bảo vệ tên riêng)</strong>
+                    <div class="mono-mini" data-i18n="set_names_desc">Tự khóa tên nhân vật, tiền tố người nói (VD: Gaspard:) và từ điển tên riêng để AI không dịch nhầm</div>
+                  </div>
+                  <sakuga-toggle id="chkKeepProperNouns" label="Chống dịch tên nhân vật" checked></sakuga-toggle>
                 </div>
-              </div>
 
-              <div class="settings-row">
-                <div>
-                  <strong data-i18n="set_dual_title">Bật Dual-Model Local (Tăng tốc UI • Giữ nguyên chất lượng Thoại)</strong>
-                  <div class="mono-mini" data-i18n="set_dual_desc">Dùng Model nhẹ dịch nhãn UI/Menu trước, tự xả VRAM rồi nạp Model chính dịch Cốt truyện &amp; QA</div>
+                <div class="settings-row">
+                  <div>
+                    <strong data-i18n="set_font_title">Vá Font Tiếng Việt (Mặc định)</strong>
+                    <div class="mono-mini" data-i18n="set_font_desc">Tự thay font fallback để chữ có dấu đều nét, không bị in hoa hay to lệch cỡ</div>
+                  </div>
+                  <sakuga-toggle id="chkPatchFonts" label="Vá Font Tiếng Việt" checked></sakuga-toggle>
                 </div>
-                <sakuga-toggle id="chkDualModelSettings" label="Dual-Model Local"></sakuga-toggle>
-              </div>
 
-              <div class="settings-divider"></div>
+                <div class="settings-divider"></div>
 
-              <div class="settings-row">
-                <div>
-                  <strong data-i18n="set_names_title">🛡 Chống dịch tên nhân vật (Bảo vệ tên riêng)</strong>
-                  <div class="mono-mini" data-i18n="set_names_desc">Tự khóa tên nhân vật, tiền tố người nói (VD: Gaspard:) và từ điển tên riêng để AI không dịch nhầm</div>
+                <div class="settings-row">
+                  <div>
+                    <strong data-i18n="set_launch_title">Chế độ mở Game an toàn</strong>
+                    <div class="mono-mini" data-i18n="set_launch_desc">Mặc định dùng Steam URI để giữ Online/Co-op</div>
+                  </div>
+                  <select id="selectLaunchMode" class="select-compact">
+                    <option value="steam">Steam Launcher (steam://rungameid)</option>
+                    <option value="shortcut">Shortcut (.url / .lnk)</option>
+                    <option value="direct_exe">Direct EXE</option>
+                  </select>
                 </div>
-                <sakuga-toggle id="chkKeepProperNouns" label="Chống dịch tên nhân vật" checked></sakuga-toggle>
-              </div>
 
-              <div class="settings-row">
-                <div>
-                  <strong data-i18n="set_font_title">Vá Font Tiếng Việt (Mặc định)</strong>
-                  <div class="mono-mini" data-i18n="set_font_desc">Tự thay font fallback để chữ có dấu đều nét, không bị in hoa hay to lệch cỡ</div>
+                <div class="settings-row">
+                  <div>
+                    <strong data-i18n="set_tray_title">Ẩn xuống khay hệ thống khi Thu nhỏ (-)</strong>
+                    <div class="mono-mini" data-i18n="set_tray_desc">Chỉ thu gọn xuống khay khi bấm Thu nhỏ (-) hoặc nút ▾ Ẩn khay; nút X luôn đóng hẳn app (có hỏi nếu đang dịch)</div>
+                  </div>
+                  <sakuga-toggle id="chkMinimizeToTray" label="Ẩn xuống khay" checked></sakuga-toggle>
                 </div>
-                <sakuga-toggle id="chkPatchFonts" label="Vá Font Tiếng Việt" checked></sakuga-toggle>
-              </div>
 
-              <div class="settings-row">
-                <div>
-                  <strong data-i18n="set_launch_title">Chế độ mở Game an toàn</strong>
-                  <div class="mono-mini" data-i18n="set_launch_desc">Mặc định dùng Steam URI để giữ Online/Co-op</div>
+                <div class="settings-row">
+                  <div>
+                    <strong data-i18n="set_cover_title">Ảnh bìa &amp; Hồ sơ Game</strong>
+                    <div class="mono-mini" data-i18n="set_cover_desc">Đổi tên, AppID hoặc ảnh bìa dọc 2:3</div>
+                  </div>
+                  <button id="btnHeroEditCover" class="btn btn-outline btn-sm" data-i18n="btn_edit_cover">🖼 Chỉnh sửa</button>
                 </div>
-                <select id="selectLaunchMode" class="select-compact">
-                  <option value="steam">Steam Launcher (steam://rungameid)</option>
-                  <option value="shortcut">Shortcut (.url / .lnk)</option>
-                  <option value="direct_exe">Direct EXE</option>
-                </select>
-              </div>
-
-              <div class="settings-row">
-                <div>
-                  <strong data-i18n="set_tray_title">Ẩn xuống khay hệ thống khi Thu nhỏ (-)</strong>
-                  <div class="mono-mini" data-i18n="set_tray_desc">Chỉ thu gọn xuống khay khi bấm Thu nhỏ (-) hoặc nút ▾ Ẩn khay; nút X luôn đóng hẳn app (có hỏi nếu đang dịch)</div>
-                </div>
-                <sakuga-toggle id="chkMinimizeToTray" label="Ẩn xuống khay" checked></sakuga-toggle>
-              </div>
-
-              <div class="settings-row">
-                <div>
-                  <strong data-i18n="set_cover_title">Ảnh bìa &amp; Hồ sơ Game</strong>
-                  <div class="mono-mini" data-i18n="set_cover_desc">Đổi tên, AppID hoặc ảnh bìa dọc 2:3</div>
-                </div>
-                <button id="btnHeroEditCover" class="btn btn-outline btn-sm" data-i18n="btn_edit_cover">🖼 Chỉnh sửa</button>
               </div>
             </div>
           </div>

@@ -890,6 +890,78 @@ sakuga-button#btnStartTranslate {
   color: #ffffff;
 }
 
+.compact-slot-strip {
+  padding-top: 8px;
+}
+.compact-slot-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.adv-entry-bar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 13px;
+  border-radius: 10px;
+  background: var(--chip);
+  border: 1.5px dashed var(--border);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, transform 120ms ease;
+}
+.adv-entry-bar:hover {
+  border-style: solid;
+  border-color: var(--border-strong);
+  background: var(--surface);
+  transform: translateY(-1px);
+}
+.adv-entry-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.adv-entry-left strong {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--ink);
+}
+.adv-entry-arrow {
+  font-weight: 800;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.reapply-top-banner {
+  margin: 12px 26px 0;
+}
+
+.settings-col-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.adv-context-box {
+  margin-top: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+.adv-context-box .context-style-head {
+  padding: 0 0 10px 0;
+  background: transparent;
+}
+.adv-context-box .context-drawer-body {
+  padding: 10px 0 0 0;
+}
+
 .quickstart-guide {
   text-align: left;
   padding: 16px 14px;

@@ -2982,7 +2982,6 @@ function bindEvents() {
   $("btnStartTranslate").addEventListener("click", handleStartOrPause);
 
   // Settings navigation shortcuts from Overview / Action strip
-  $("btnOpenSavedQuick")?.addEventListener("click", () => switchSubtab("saved"));
   $("btnOpenSettingsDrawer").addEventListener("click", () => switchSubtab(state.subtab === "settings" ? "overview" : "settings"));
   $("btnLinkToFullSettings").addEventListener("click", () => switchSubtab("settings"));
   $("btnViewAllLive").addEventListener("click", () => switchSubtab("live"));
