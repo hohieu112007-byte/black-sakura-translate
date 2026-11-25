@@ -2981,9 +2981,7 @@ function bindEvents() {
   $("btnQuickRestore").addEventListener("click", () => selectedGame() && restoreGame(selectedGame().game_id));
   $("btnStartTranslate").addEventListener("click", handleStartOrPause);
 
-  // Settings navigation shortcuts from Overview / Action strip
-  $("btnOpenSettingsDrawer").addEventListener("click", () => switchSubtab(state.subtab === "settings" ? "overview" : "settings"));
-  $("btnLinkToFullSettings").addEventListener("click", () => switchSubtab("settings"));
+  // Navigation shortcut from Overview live preview
   $("btnViewAllLive").addEventListener("click", () => switchSubtab("live"));
   $("btnToggleSlotDrawer").addEventListener("click", () => {
     const isCurrentlyHidden = $("inlineSlotCollapse").classList.contains("hidden");

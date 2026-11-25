@@ -899,45 +899,6 @@ sakuga-button#btnStartTranslate {
   flex-shrink: 0;
 }
 
-.adv-entry-bar {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 13px;
-  border-radius: 10px;
-  background: var(--chip);
-  border: 1.5px dashed var(--border);
-  color: var(--ink);
-  font-family: var(--font-sans);
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 140ms ease, background 140ms ease, transform 120ms ease;
-}
-.adv-entry-bar:hover {
-  border-style: solid;
-  border-color: var(--border-strong);
-  background: var(--surface);
-  transform: translateY(-1px);
-}
-.adv-entry-left {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.adv-entry-left strong {
-  font-size: 12px;
-  font-weight: 800;
-  color: var(--ink);
-}
-.adv-entry-arrow {
-  font-weight: 800;
-  color: var(--muted);
-  flex-shrink: 0;
-}
-
 .reapply-top-banner {
   margin: 12px 26px 0;
 }
