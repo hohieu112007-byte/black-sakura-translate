@@ -17,7 +17,7 @@ import httpx
 import psutil
 
 from core.database import GameCacheDB, GlobalTMDB
-from core.hardware_profiler import HardwareProfiler, normalize_ollama_url
+from core.hardware_profiler import HardwareProfiler, cap_workers_for_free_vram, normalize_ollama_url
 from core.prompts import (
     build_fallback_style_card,
     build_glossary_system_prompt,
@@ -49,7 +49,7 @@ logger = logging.getLogger("sakuga.qwen")
 MODEL_NAME = "qwen3.5:4b"
 OLLAMA_URL = normalize_ollama_url(os.environ.get("OLLAMA_HOST"))
 BATCH_SIZE = 25
-MAX_CONCURRENT_STREAMS = 5
+MAX_CONCURRENT_STREAMS = 4
 
 THINKING_MODEL_PREFIXES = ("qwen3", "qwen3.5", "deepseek-r1", "qwq", "gpt-oss", "nemotron", "cogito")
 
@@ -317,6 +317,161 @@ def _split_qa_anchor_and_candidate(raw_rest: str, row_hint: Optional[Dict[str, A
     return raw_rest.split("|", 1)
 
 
+class DynamicVramGuard:
+    """Monitors GPU VRAM & Ollama /api/ps offload state to dynamically adjust worker concurrency."""
+
+    _OOM_HINTS = ("out of memory", "oom", "cuda", "alloc", "timeout", "timed out", "ggml_backend")
+
+    def __init__(
+        self,
+        profiler: HardwareProfiler,
+        max_workers: int,
+        base_url: str,
+        has_gpu: bool = True,
+        vram_total_gb: float = 0.0,
+        initial_workers: Optional[int] = None,
+        initial_note: str = "",
+        check_interval_s: float = 2.5,
+    ) -> None:
+        self.profiler = profiler
+        self.max_workers = max(1, int(max_workers or 1))
+        self.base_url = base_url
+        self.has_gpu = bool(has_gpu)
+        self.vram_total_gb = float(vram_total_gb or 0.0)
+        init_w = self.max_workers if initial_workers is None else int(initial_workers)
+        self.current_limit = max(1, min(self.max_workers, init_w))
+        self.active_count = 0
+        self.ctx_cap: Optional[int] = 2048 if self.current_limit < self.max_workers else None
+        self.pressure_active: bool = bool(self.current_limit < self.max_workers)
+        self.note: str = initial_note or ""
+        self.last_vram_pct: float = 0.0
+        self.last_gpu_offload_pct: Optional[float] = None
+        self.last_cpu_spillover: bool = False
+        self.check_interval_s = max(0.1, float(check_interval_s))
+        self._healthy_streak: int = 0
+        self._last_check_ts: float = 0.0
+        self._cond = asyncio.Condition()
+
+    async def acquire(self) -> None:
+        async with self._cond:
+            while self.active_count >= self.current_limit:
+                await self._cond.wait()
+            self.active_count += 1
+
+    async def release(self) -> None:
+        async with self._cond:
+            self.active_count = max(0, self.active_count - 1)
+            self._cond.notify_all()
+
+    async def evaluate_metrics(
+        self,
+        vram_used_gb: float,
+        vram_total_gb: float,
+        vram_free_gb: float,
+        gpu_offload_pct: Optional[float] = None,
+        cpu_spillover: bool = False,
+    ) -> Dict[str, Any]:
+        if not self.has_gpu or vram_total_gb <= 0.5:
+            return self.status_dict()
+
+        vram_pct = round((float(vram_used_gb) / float(vram_total_gb)) * 100.0, 1)
+        self.last_vram_pct = vram_pct
+        self.last_gpu_offload_pct = gpu_offload_pct
+        spill = bool(cpu_spillover and gpu_offload_pct is not None and gpu_offload_pct < 95.0)
+        self.last_cpu_spillover = spill
+
+        high_vram = (vram_pct >= 90.0) or (vram_free_gb > 0 and vram_free_gb < 0.7)
+        if high_vram or spill:
+            self._healthy_streak = 0
+            severe = (vram_pct >= 95.0) or (gpu_offload_pct is not None and gpu_offload_pct < 85.0)
+            step = 2 if severe else 1
+            new_lim = max(1, self.current_limit - step)
+            self.current_limit = new_lim
+            self.ctx_cap = 2048
+            self.pressure_active = True
+            if spill and gpu_offload_pct is not None:
+                self.note = f"🛡️ Model tràn RAM ({gpu_offload_pct:.0f}% GPU) • Hạ còn {new_lim} luồng"
+            else:
+                self.note = f"🛡️ VRAM {vram_pct:.0f}% • Tự hạ còn {new_lim} luồng"
+        elif (
+            self.current_limit < self.max_workers
+            and vram_pct < 78.0
+            and (vram_free_gb <= 0 or vram_free_gb >= 1.6)
+            and not spill
+        ):
+            self._healthy_streak += 1
+            if self._healthy_streak >= 3:
+                self.current_limit = min(self.max_workers, self.current_limit + 1)
+                self._healthy_streak = 0
+                if self.current_limit >= self.max_workers:
+                    self.pressure_active = False
+                    self.ctx_cap = None
+                    self.note = ""
+                else:
+                    self.note = f"🛡️ VRAM ổn định • Nâng dần lên {self.current_limit}/{self.max_workers} luồng"
+                async with self._cond:
+                    self._cond.notify_all()
+        else:
+            self._healthy_streak = 0
+
+        return self.status_dict()
+
+    async def check_and_adjust(
+        self,
+        client: Optional[httpx.AsyncClient] = None,
+        ps_fetcher: Optional[Callable[..., Any]] = None,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        now = time.monotonic()
+        if not force and (now - self._last_check_ts) < self.check_interval_s:
+            return self.status_dict()
+        self._last_check_ts = now
+
+        hw = self.profiler.probe_system(force_refresh=True) or {}
+        gpu_offload_pct: Optional[float] = None
+        cpu_spillover = False
+        if ps_fetcher is not None:
+            try:
+                ps = await ps_fetcher(client=client, force=force)
+                if isinstance(ps, dict):
+                    gpu_offload_pct = ps.get("gpu_offload_pct")
+                    cpu_spillover = bool(ps.get("cpu_spillover", False))
+            except Exception:
+                pass
+
+        return await self.evaluate_metrics(
+            vram_used_gb=float(hw.get("vram_used_gb") or 0.0),
+            vram_total_gb=float(hw.get("vram_total_gb") or self.vram_total_gb or 0.0),
+            vram_free_gb=float(hw.get("vram_free_gb") or 0.0),
+            gpu_offload_pct=gpu_offload_pct,
+            cpu_spillover=cpu_spillover,
+        )
+
+    async def report_error(self, exc: Exception) -> bool:
+        msg = str(exc or "").lower()
+        if any(tok in msg for tok in self._OOM_HINTS):
+            self._healthy_streak = 0
+            self.current_limit = max(1, self.current_limit - 1)
+            self.ctx_cap = 2048
+            self.pressure_active = True
+            self.note = f"🛡️ Lỗi VRAM/Timeout • Tự hạ còn {self.current_limit} luồng"
+            return True
+        return False
+
+    def status_dict(self) -> Dict[str, Any]:
+        return {
+            "max_workers": self.max_workers,
+            "current_limit": self.current_limit,
+            "active_count": self.active_count,
+            "ctx_cap": self.ctx_cap,
+            "pressure_active": self.pressure_active,
+            "note": self.note,
+            "vram_pct": self.last_vram_pct,
+            "gpu_offload_pct": self.last_gpu_offload_pct,
+            "cpu_spillover": self.last_cpu_spillover,
+        }
+
+
 class QwenEngine:
     """Async Producer-Consumer Ollama Engine supporting Auto Hardware Tiers & any local model."""
 
@@ -331,6 +486,9 @@ class QwenEngine:
         self._used_models: set[str] = set()
         self._active_runtime_model: str = ""
         self._active_runtime_role: str = "IDLE"
+        self._last_ps_info: Dict[str, Any] = {}
+        self._last_ps_ts: float = 0.0
+        self._vram_guard_state: Dict[str, Any] = {}
 
     def get_effective_config(self) -> Dict[str, Any]:
         return self.profiler.get_effective_settings()
@@ -341,9 +499,11 @@ class QwenEngine:
     def get_telemetry(self) -> Dict[str, Any]:
         eff = self.profiler.get_effective_settings()
         hw = eff.get("hardware", {})
+        guard_workers = int(self._vram_guard_state.get("current_limit") or eff.get("parallel_workers", MAX_CONCURRENT_STREAMS))
         return {
             "gpu_name": hw.get("gpu_name", "CPU Fallback"),
             "vram_used_gb": hw.get("vram_used_gb", 0.0),
+            "vram_free_gb": hw.get("vram_free_gb", 0.0),
             "vram_total_gb": hw.get("vram_total_gb", 0.0),
             "cpu_pct": hw.get("cpu_pct", 0.0),
             "ram_used_gb": hw.get("ram_used_gb", 0.0),
@@ -352,6 +512,7 @@ class QwenEngine:
             "dual_model_enabled": bool(eff.get("dual_model_enabled")),
             "ui_fast_model": eff.get("ui_fast_model", ""),
             "quiet_mode": bool(eff.get("quiet_mode", False)),
+            "low_ram_mode": bool(eff.get("low_ram_mode", True)),
             "batch_cooldown_ms": int(eff.get("batch_cooldown_ms", 0)),
             "active_runtime_model": self._active_runtime_model or eff.get("main_model", MODEL_NAME),
             "active_runtime_role": self._active_runtime_role or "IDLE",
@@ -359,7 +520,60 @@ class QwenEngine:
             "num_ctx": eff.get("num_ctx", 2048),
             "tier_label": hw.get("tier_label", "Auto"),
             "profile_badge": eff.get("profile_badge", ""),
+            "gpu_offload_pct": self._last_ps_info.get("gpu_offload_pct"),
+            "cpu_spillover": bool(self._last_ps_info.get("cpu_spillover", False)),
+            "size_vram_gb": self._last_ps_info.get("size_vram_gb", 0.0),
+            "size_total_gb": self._last_ps_info.get("size_total_gb", 0.0),
+            "vram_guard_active": bool(self._vram_guard_state.get("pressure_active", False)),
+            "vram_guard_workers": guard_workers,
+            "vram_guard_note": str(self._vram_guard_state.get("note") or ""),
         }
+
+    async def fetch_ollama_ps(
+        self,
+        client: Optional[httpx.AsyncClient] = None,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Inspect active Ollama /api/ps models to measure real VRAM vs CPU RAM offload."""
+        now = time.monotonic()
+        if not force and self._last_ps_ts > 0.0 and (now - self._last_ps_ts) < 2.5:
+            return dict(self._last_ps_info)
+        base_url = self.get_base_url()
+        try:
+            if client is not None:
+                resp = await client.get(f"{base_url}/api/ps", timeout=1.5)
+            else:
+                async with httpx.AsyncClient(timeout=1.5) as tmp_c:
+                    resp = await tmp_c.get(f"{base_url}/api/ps")
+            resp.raise_for_status()
+            models = resp.json().get("models") or []
+            total_b = sum(int(m.get("size") or 0) for m in models if isinstance(m, dict))
+            vram_b = sum(int(m.get("size_vram") or 0) for m in models if isinstance(m, dict))
+            cpu_b = max(0, total_b - vram_b)
+            offload_pct = round((vram_b / total_b) * 100.0, 1) if total_b > 0 else None
+            cpu_spill = bool(total_b > 0 and vram_b < (total_b * 0.98))
+            ps_info = {
+                "loaded_models": [
+                    {
+                        "name": str(m.get("name") or m.get("model") or ""),
+                        "size_gb": round(int(m.get("size") or 0) / (1024 ** 3), 2),
+                        "size_vram_gb": round(int(m.get("size_vram") or 0) / (1024 ** 3), 2),
+                    }
+                    for m in models
+                    if isinstance(m, dict)
+                ],
+                "size_total_gb": round(total_b / (1024 ** 3), 2),
+                "size_vram_gb": round(vram_b / (1024 ** 3), 2),
+                "size_cpu_gb": round(cpu_b / (1024 ** 3), 2),
+                "gpu_offload_pct": offload_pct,
+                "cpu_spillover": cpu_spill,
+            }
+            self._last_ps_info = dict(ps_info)
+            self._last_ps_ts = now
+            return ps_info
+        except Exception:
+            self._last_ps_ts = now
+            return dict(self._last_ps_info) if self._last_ps_info else {}
 
     async def list_local_models(self) -> List[Dict[str, Any]]:
         base_url = self.get_base_url()
@@ -398,6 +612,7 @@ class QwenEngine:
             async with httpx.AsyncClient(timeout=3.0) as client:
                 resp = await client.get(f"{base_url}/api/tags")
                 resp.raise_for_status()
+            ps_info = await self.fetch_ollama_ps()
             has_selected = any(m == main_model or m.startswith(main_model.split(":")[0]) for m in models)
             return {
                 "online": True,
@@ -409,10 +624,12 @@ class QwenEngine:
                 "dual_model_enabled": eff["dual_model_enabled"],
                 "ui_fast_model": eff["ui_fast_model"],
                 "parallel_workers": eff["parallel_workers"],
+                "low_ram_mode": bool(eff.get("low_ram_mode", True)),
                 "tier_label": hw.get("tier_label", "Auto"),
                 "profile_badge": eff.get("profile_badge", ""),
                 "ollama_env_warning": eff.get("ollama_env_warning", ""),
                 "recommended_models": hw.get("recommended_models", []),
+                "ollama_ps": ps_info,
                 "label": f"{main_model} • {eff.get('profile_badge', '')}",
             }
         except Exception:
@@ -582,6 +799,8 @@ class QwenEngine:
             "num_predict": dyn_predict,
             "top_p": 0.9,
         }
+        if bool(eff.get("low_ram_mode", True)):
+            opts["use_mmap"] = False
 
         can_think = supports_thinking(model)
         use_stream = (stream_cb is not None) or (thinking_cb is not None)
@@ -827,6 +1046,8 @@ class QwenEngine:
         num_ctx: Optional[int] = None,
         batch_stream_cb: Optional[Callable[[int, float], None]] = None,
         protected_names: Optional[set[str]] = None,
+        ctx_cap: Optional[int] = None,
+        vram_guard: Optional[DynamicVramGuard] = None,
     ) -> Tuple[int, float]:
         await pause_event.wait()
 
@@ -895,6 +1116,8 @@ class QwenEngine:
                 probe_vram = float((self.profiler.probe_system() or {}).get("vram_total_gb") or 0.0)
                 if probe_vram >= 7.0:
                     batch_ctx = max(batch_ctx, 3072)
+            if ctx_cap:
+                batch_ctx = min(batch_ctx, int(ctx_cap))
 
             def _live_think_cb(snippet: str) -> None:
                 if emit_cb and snippet:
@@ -932,8 +1155,11 @@ class QwenEngine:
             except asyncio.CancelledError:
                 raise
             except Exception as first_exc:
+                if vram_guard is not None:
+                    await vram_guard.report_error(first_exc)
                 if use_think:
                     logger.warning("DEEP_THINK batch failed (%s); auto-retrying batch with think=False.", first_exc)
+                    fb_ctx = min(int(num_ctx or 2048), int(ctx_cap)) if ctx_cap else num_ctx
                     try:
                         content, thinking, eval_cnt, elapsed = await self._call_ollama_chat(
                             client,
@@ -942,13 +1168,15 @@ class QwenEngine:
                             think=False,
                             temperature=0.15,
                             model_name=eff_model,
-                            num_ctx=num_ctx,
+                            num_ctx=fb_ctx,
                         )
                         total_tokens += eval_cnt
                         total_elapsed += elapsed
                     except asyncio.CancelledError:
                         raise
                     except Exception as second_exc:
+                        if vram_guard is not None:
+                            await vram_guard.report_error(second_exc)
                         if len(batch_rows) == 1:
                             raise
                         logger.warning("Batch fallback also failed (%s); falling back to micro-chunk retries.", second_exc)
@@ -1039,6 +1267,7 @@ class QwenEngine:
                         if hits:
                             locked_hint = f" KEEP THESE CHARACTER NAMES VERBATIM (DO NOT TRANSLATE): {', '.join(hits)}."
                     try:
+                        retry_ctx = min(int(num_ctx or 2048), int(ctx_cap)) if ctx_cap else num_ctx
                         r_content, _r_think, r_tok, r_elap = await self._call_ollama_chat(
                             client,
                             sys_prompt
@@ -1048,13 +1277,15 @@ class QwenEngine:
                             think=False,
                             temperature=0.0,
                             model_name=model_name,
-                            num_ctx=num_ctx,
+                            num_ctx=retry_ctx,
                         )
                         total_tokens += r_tok
                         total_elapsed += r_elap
                     except asyncio.CancelledError:
                         raise
                     except Exception as retry_exc:
+                        if vram_guard is not None:
+                            await vram_guard.report_error(retry_exc)
                         logger.warning("Micro-chunk retry failed (%s); keeping safe fallback for %d lines.", retry_exc, len(sub_ids))
                         still_bad.extend(sub_ids)
                         continue
@@ -1451,12 +1682,14 @@ class QwenEngine:
                 b_rows: List[Dict[str, Any]],
                 use_model: str,
                 pool_width: int = 0,
+                ctx_cap: Optional[int] = None,
+                vram_guard: Optional[DynamicVramGuard] = None,
             ) -> None:
                 nonlocal cum_tokens, batch_seq_counter, completed_batches, completed_chars, ema_cps, last_eta_sec, last_stream_emit
                 await pause_event.wait()
                 batch_seq_counter += 1
                 my_bid = batch_seq_counter
-                eff_pool_w = pool_width or workers
+                eff_pool_w = vram_guard.current_limit if vram_guard else (pool_width or workers)
                 b_chars = sum(max(8, len(r["masked_text"])) for r in b_rows)
                 is_deep_batch = (ai_mode == "DEEP_THINK") and _batch_needs_deep_think(b_rows, prompt_mode, short_flag, use_model)
 
@@ -1471,16 +1704,19 @@ class QwenEngine:
                     wall_s = max(0.25, (now_s - t_phase_start) - self._pause_accum.get(game_id, 0.0))
                     live_tps = round(live_total_toks / wall_s, 1)
                     prog_now = cache_db.get_progress(source_lang, target_lang)
+                    guard_w = vram_guard.current_limit if vram_guard else eff_pool_w
+                    guard_note = vram_guard.note if vram_guard else ""
+                    base_lbl = (
+                        f"🧠 Deep-Think {guard_w}x ({use_model}) • Gói {completed_batches}/{total_batches} • Đang suy luận..."
+                        if is_deep_batch
+                        else f"Pool {guard_w}x ({use_model}) • {completed_batches}/{total_batches} gói..."
+                    )
                     emit_cb(
                         "progress",
                         {
                             **prog_now,
                             "phase": "TRANSLATING",
-                            "phase_label": (
-                                f"🧠 Deep-Think {eff_pool_w}x ({use_model}) • Gói {completed_batches}/{total_batches} • Đang suy luận..."
-                                if is_deep_batch
-                                else f"Pool {eff_pool_w}x ({use_model}) • {completed_batches}/{total_batches} gói..."
-                            ),
+                            "phase_label": f"{base_lbl} • {guard_note}" if guard_note else base_lbl,
                             "active_model": use_model,
                             "active_model_role": "MAIN_STORY",
                             "dual_model_active": dual_enabled,
@@ -1489,6 +1725,10 @@ class QwenEngine:
                             "tok_per_sec": live_tps,
                             "chars_done": completed_chars + tm_chars,
                             "chars_total": total_rem_chars + tm_chars,
+                            "vram_guard_active": bool(vram_guard and vram_guard.pressure_active),
+                            "vram_guard_workers": guard_w,
+                            "vram_guard_note": guard_note,
+                            "gpu_offload_pct": vram_guard.last_gpu_offload_pct if vram_guard else None,
                             "telemetry": self.get_telemetry(),
                         },
                     )
@@ -1516,6 +1756,8 @@ class QwenEngine:
                         num_ctx=ctx_sz,
                         batch_stream_cb=_on_batch_stream if is_deep_batch else None,
                         protected_names=protected_names,
+                        ctx_cap=ctx_cap,
+                        vram_guard=vram_guard,
                     )
                 finally:
                     in_flight_tokens.pop(my_bid, None)
@@ -1523,6 +1765,7 @@ class QwenEngine:
                 cum_tokens += toks
                 completed_batches += 1
                 completed_chars += b_chars
+                eff_pool_w = vram_guard.current_limit if vram_guard else eff_pool_w
 
                 active_wall = max(0.25, (time.perf_counter() - t_phase_start) - self._pause_accum.get(game_id, 0.0))
                 tps = round((cum_tokens + sum(in_flight_tokens.values())) / active_wall, 1)
@@ -1557,14 +1800,16 @@ class QwenEngine:
                     role_tag = "UI_FAST" if (dual_enabled and short_flag and use_model == ui_fast_model and ui_fast_model != main_model) else "MAIN_STORY"
                     self._active_runtime_model = use_model
                     self._active_runtime_role = role_tag
+                    guard_note = vram_guard.note if vram_guard else ""
                     pool_tag = f"🧠 Deep-Think {eff_pool_w}x" if is_deep_batch else f"Pool {eff_pool_w}x"
+                    base_phase_lbl = f"{pool_tag} ({use_model}) • {completed_batches}/{total_batches} gói • {rem_chars:,} ký tự còn lại"
                     emit_cb(
                         "progress",
                         {
                             **prog,
                             "weighted_pct": max(prog["pct"], min(99.5 if rem_batches > 0 else 100.0, weighted_pct)),
                             "phase": "TRANSLATING",
-                            "phase_label": f"{pool_tag} ({use_model}) • {completed_batches}/{total_batches} gói • {rem_chars:,} ký tự còn lại",
+                            "phase_label": f"{base_phase_lbl} • {guard_note}" if guard_note else base_phase_lbl,
                             "active_model": use_model,
                             "active_model_role": role_tag,
                             "dual_model_active": dual_enabled,
@@ -1574,6 +1819,10 @@ class QwenEngine:
                             "eta_seconds": eta,
                             "chars_done": completed_chars + tm_chars,
                             "chars_total": total_rem_chars + tm_chars,
+                            "vram_guard_active": bool(vram_guard and vram_guard.pressure_active),
+                            "vram_guard_workers": eff_pool_w,
+                            "vram_guard_note": guard_note,
+                            "gpu_offload_pct": vram_guard.last_gpu_offload_pct if vram_guard else None,
                             "telemetry": self.get_telemetry(),
                         },
                     )
@@ -1587,22 +1836,66 @@ class QwenEngine:
                 q: asyncio.Queue[Tuple[str, bool, List[Dict[str, Any]], str]] = asyncio.Queue()
                 for it in items:
                     q.put_nowait(it)
-                n_workers = min(max_workers or workers, len(items))
+                target_max_w = min(max_workers or workers, len(items))
+                hw_now = self.profiler.probe_system(force_refresh=True) or {}
+                init_w, init_note = cap_workers_for_free_vram(
+                    target_max_w,
+                    bool(hw_now.get("has_nvidia_gpu")),
+                    float(hw_now.get("vram_total_gb") or 0.0),
+                    float(hw_now.get("vram_free_gb") or 0.0),
+                )
+                guard = DynamicVramGuard(
+                    self.profiler,
+                    max_workers=target_max_w,
+                    base_url=self.get_base_url(),
+                    has_gpu=bool(hw_now.get("has_nvidia_gpu")),
+                    vram_total_gb=float(hw_now.get("vram_total_gb") or 0.0),
+                    initial_workers=init_w,
+                    initial_note=init_note,
+                )
+                self._vram_guard_state = guard.status_dict()
 
                 async def _worker() -> None:
                     while True:
+                        await guard.acquire()
+                        got_item = False
                         try:
-                            pm, short_fl, b_rows, mdl = q.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                        try:
-                            await _run_batch_and_report(pm, short_fl, b_rows, mdl, pool_width=n_workers)
-                            if cooldown_s > 0:
-                                await asyncio.sleep(cooldown_s)
+                            try:
+                                pm, short_fl, b_rows, mdl = q.get_nowait()
+                                got_item = True
+                            except asyncio.QueueEmpty:
+                                break
+                            self._vram_guard_state = await guard.check_and_adjust(
+                                client=client,
+                                ps_fetcher=self.fetch_ollama_ps,
+                            )
+                            try:
+                                await _run_batch_and_report(
+                                    pm,
+                                    short_fl,
+                                    b_rows,
+                                    mdl,
+                                    pool_width=guard.current_limit,
+                                    ctx_cap=guard.ctx_cap,
+                                    vram_guard=guard,
+                                )
+                                if cooldown_s > 0:
+                                    await asyncio.sleep(cooldown_s)
+                            finally:
+                                q.task_done()
+                                self._vram_guard_state = await guard.check_and_adjust(
+                                    client=client,
+                                    ps_fetcher=self.fetch_ollama_ps,
+                                )
                         finally:
-                            q.task_done()
+                            await guard.release()
+                            if not got_item:
+                                break
 
-                await asyncio.gather(*(_worker() for _ in range(n_workers)))
+                try:
+                    await asyncio.gather(*(_worker() for _ in range(target_max_w)))
+                finally:
+                    self._vram_guard_state = {}
 
             try:
                 if dual_enabled and ui_fast_model != main_model and ui_batches:

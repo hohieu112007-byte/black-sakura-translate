@@ -38,6 +38,7 @@ from extractors.unreal_locres import (
     diagnose_unreal_empty_scan,
     extract_unreal_slot_entries,
     scan_unreal_localization,
+    scan_unreal_localization_detailed,
 )
 from safety_shield.encoding_guard import detect_encoding_and_eol, write_preserving_encoding
 
@@ -356,6 +357,8 @@ def scan_game_languages(game_dir: str | Path, aes_key: Optional[str] = None) -> 
                 cur["count"] = max(cur.get("count", 0), s.get("count", 0))
                 if s.get("pak_entries"):
                     cur.setdefault("pak_entries", []).extend(s["pak_entries"])
+                if s.get("utoc_entries"):
+                    cur.setdefault("utoc_entries", []).extend(s["utoc_entries"])
                 if s.get("rpa_files"):
                     cur.setdefault("rpa_files", []).extend(s["rpa_files"])
                 if s.get("csv_columns"):
@@ -372,8 +375,18 @@ def scan_game_languages(game_dir: str | Path, aes_key: Optional[str] = None) -> 
     # Run native hunters according to detected engine first, plus external files
     if "unity" in engine.lower():
         _merge(scan_unity_loc_tables(root))
+    unreal_detail: Dict[str, Any] = {
+        "is_aes_encrypted": False,
+        "is_iostore": False,
+        "has_pak_signature": False,
+        "shipping_exe_path": "",
+        "discovered_aes_key": "",
+        "error_code": None,
+        "diagnostic": None,
+    }
     if "unreal" in engine.lower() or any(root.rglob("*.locres")):
-        _merge(scan_unreal_localization(root, aes_key=aes_key))
+        unreal_detail = scan_unreal_localization_detailed(root, aes_key=aes_key, auto_dump=True)
+        _merge(unreal_detail.get("slots", []))
     if "ren'py" in engine.lower():
         _merge(_scan_rpa_tl_archives(root))
 
@@ -388,7 +401,7 @@ def scan_game_languages(game_dir: str | Path, aes_key: Optional[str] = None) -> 
         if "unity" in engine.lower():
             diag = diagnose_unity_empty_scan(root)
         elif "unreal" in engine.lower():
-            diag = diagnose_unreal_empty_scan(root, aes_key=aes_key)
+            diag = unreal_detail.get("diagnostic") or diagnose_unreal_empty_scan(root, aes_key=aes_key)
         method_label = diag or "Không tìm thấy bảng ngôn ngữ gốc"
 
     return {
@@ -397,6 +410,12 @@ def scan_game_languages(game_dir: str | Path, aes_key: Optional[str] = None) -> 
         "method": method_label,
         "slots": slots_out,
         "slot_count": len(slots_out),
+        "is_aes_encrypted": bool(unreal_detail.get("is_aes_encrypted")),
+        "is_iostore": bool(unreal_detail.get("is_iostore")),
+        "has_pak_signature": bool(unreal_detail.get("has_pak_signature")),
+        "shipping_exe_path": unreal_detail.get("shipping_exe_path", ""),
+        "discovered_aes_key": unreal_detail.get("discovered_aes_key", ""),
+        "error_code": unreal_detail.get("error_code"),
     }
 
 

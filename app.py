@@ -68,6 +68,12 @@ from extractors.localization_hub import (
     extract_slot_entries,
     scan_game_languages,
 )
+from extractors.unreal_locres import (
+    auto_dump_unreal_aes_keys,
+    inspect_unreal_paks,
+    normalize_aes_key,
+    verify_unreal_aes_key,
+)
 from safety_shield.anticheat_guard import scan_anticheat
 from safety_shield.backup_manager import BackupManager
 from safety_shield.encoding_guard import (
@@ -83,7 +89,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("sakuga.app")
 
 FRONTEND_DIR = BUNDLE_DIR / "frontend"
-for _runtime_dir in ("backups", "cache", "covers", "tools", "skills"):
+for _runtime_dir in ("backups", "cache", "covers", "exports", "tools", "skills"):
     (APP_DIR / _runtime_dir).mkdir(parents=True, exist_ok=True)
 if BUNDLE_DIR != APP_DIR and (BUNDLE_DIR / "skills").exists():
     for _layer in ("languages", "styles"):
@@ -277,6 +283,10 @@ class AddGameRequest(BaseModel):
     path: str
 
 
+class UnrealAesKeyRequest(BaseModel):
+    aes_key: str
+
+
 class ScanRequest(BaseModel):
     source_lang: Optional[str] = None
     target_lang: Optional[str] = "vi"
@@ -389,6 +399,7 @@ class HardwareSettingsRequest(BaseModel):
     dual_model_enabled: Optional[bool] = None
     ui_fast_model: Optional[str] = None
     quiet_mode: Optional[bool] = None
+    low_ram_mode: Optional[bool] = None
     parallel_workers: Optional[int] = None
     num_ctx: Optional[int] = None
     ui_batch_size: Optional[int] = None
@@ -410,6 +421,17 @@ class SakugaPackImportRequest(BaseModel):
     content_b64: str
     auto_apply: bool = True
     inject_slot: Optional[str] = None
+
+
+class ExternalTranslationImportRequest(BaseModel):
+    filename: str = "translated.json"
+    content_b64: str
+    source_lang: Optional[str] = None
+    target_lang: Optional[str] = None
+    auto_apply: bool = True
+    inject_slot: Optional[str] = None
+    patch_fonts: bool = True
+    force_offline_override: bool = False
 
 
 class PullModelRequest(BaseModel):
@@ -480,6 +502,7 @@ async def serve_cover(filename: str):
 
 @app.get("/api/health")
 async def api_health():
+    await qwen_engine.fetch_ollama_ps()
     ollama_st, telemetry, hw_eff = await asyncio.gather(
         qwen_engine.check_ollama_status(),
         asyncio.to_thread(qwen_engine.get_telemetry),
@@ -1201,13 +1224,25 @@ async def api_add_game(req: AddGameRequest):
             "source_lang": source_lang,
             "target_lang": "vi",
             "inject_slot": default_inject,
+            "aes_key": profile.get("aes_key") or None,
+            "is_aes_encrypted": int(profile.get("is_aes_encrypted", 0) or 0),
+            "is_iostore": int(profile.get("is_iostore", 0) or 0),
+            "has_pak_signature": int(profile.get("has_pak_signature", 0) or 0),
         }
     )
     saved["cover_url"] = await _resolve_cover_url(saved)
     saved["ranked_slots"] = ranked
     saved["has_backup"] = backup_mgr.has_backup(saved["game_id"], saved["game_dir"])
     _hydrate_saved_translation_flags(saved)
-    return {"ok": True, "game": saved}
+    return {
+        "ok": True,
+        "game": saved,
+        "error_code": profile.get("error_code"),
+        "shipping_exe_path": profile.get("shipping_exe_path", ""),
+        "is_aes_encrypted": bool(saved.get("is_aes_encrypted")),
+        "is_iostore": bool(saved.get("is_iostore")),
+        "has_pak_signature": bool(saved.get("has_pak_signature")),
+    }
 
 
 @app.get("/api/games/{game_id}")
@@ -1334,27 +1369,126 @@ async def api_rank_slots(game_id: str, req: SlotRankRequest):
     return {"ranked_slots": ranked, "inject_slot": chosen_slot}
 
 
-@app.post("/api/games/{game_id}/scan")
-async def api_scan_game(game_id: str, req: ScanRequest):
-    game = library_db.get_game(game_id)
-    if not game:
-        raise HTTPException(status_code=404, detail="Game not found")
+def _game_export_dir(game_id: str) -> Path:
+    return APP_DIR / "exports" / _validate_safe_id(game_id, "game_id")
 
+
+def _game_export_slug(game: Dict[str, Any], game_id: str) -> str:
+    raw = (game.get("title") or game_id or "game")
+    slug = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(raw)).strip("_")
+    return slug or str(game_id)
+
+
+def _sync_external_source_snapshot(
+    game_id: str,
+    game: Dict[str, Any],
+    cache_db: GameCacheDB,
+    src_lang: str,
+    tgt_lang: str,
+) -> Dict[str, Any]:
+    meta = {
+        "game_id": game_id,
+        "title": game.get("title") or game_id,
+        "engine": game.get("engine") or "",
+        "steam_appid": game.get("steam_appid") or "",
+    }
+    snap = cache_db.write_external_source_snapshot(
+        export_dir=_game_export_dir(game_id),
+        safe_slug=_game_export_slug(game, game_id),
+        source_lang=src_lang,
+        target_lang=tgt_lang,
+        game_meta=meta,
+    )
+    if snap:
+        return snap
+    return {
+        "available": False,
+        "dir_path": str(_game_export_dir(game_id)),
+        "source_lang": src_lang,
+        "target_lang": tgt_lang,
+        "total_strings": 0,
+    }
+
+
+def _get_or_sync_external_source_info(
+    game_id: str,
+    game: Dict[str, Any],
+    cache_db: GameCacheDB,
+    src_lang: str,
+    tgt_lang: str,
+) -> Dict[str, Any]:
+    export_dir = _game_export_dir(game_id)
+    slug = _game_export_slug(game, game_id)
+    json_path = export_dir / f"{slug}_{src_lang}_source.json"
+    txt_path = export_dir / f"{slug}_{src_lang}_source.txt"
+    prog = cache_db.get_progress(src_lang, tgt_lang)
+    total = int(prog.get("total") or 0)
+    if total <= 0:
+        return {
+            "available": False,
+            "dir_path": str(export_dir),
+            "source_lang": src_lang,
+            "target_lang": tgt_lang,
+            "total_strings": 0,
+        }
+    if json_path.exists() and txt_path.exists():
+        try:
+            st = json_path.stat()
+            return {
+                "available": True,
+                "dir_path": str(export_dir),
+                "json_path": str(json_path),
+                "txt_path": str(txt_path),
+                "json_filename": json_path.name,
+                "txt_filename": txt_path.name,
+                "source_lang": src_lang,
+                "target_lang": tgt_lang,
+                "total_strings": total,
+                "size_bytes": int(st.st_size),
+                "updated_at": int(st.st_mtime),
+            }
+        except OSError:
+            pass
+    return _sync_external_source_snapshot(game_id, game, cache_db, src_lang, tgt_lang)
+
+
+async def _perform_game_scan(
+    game_id: str,
+    game: Dict[str, Any],
+    source_lang: Optional[str] = None,
+    target_lang: Optional[str] = "vi",
+    scope: str = "FULL_PATCH",
+    translate_choices: bool = True,
+    aes_key: Optional[str] = None,
+) -> Dict[str, Any]:
     game_dir = game["game_dir"]
-    eff_aes_key = (req.aes_key if req.aes_key is not None else game.get("aes_key")) or ""
+    eff_aes_key = (aes_key if aes_key is not None else game.get("aes_key")) or ""
+    if eff_aes_key.strip():
+        try:
+            eff_aes_key = normalize_aes_key(eff_aes_key)
+        except ValueError:
+            eff_aes_key = eff_aes_key.strip()
     ac_report = await asyncio.to_thread(scan_anticheat, game_dir)
     loc_report = await asyncio.to_thread(scan_game_languages, game_dir, eff_aes_key)
     slots = loc_report.get("slots", [])
+    final_aes_key = loc_report.get("discovered_aes_key") or eff_aes_key.strip()
 
-    src_lang = req.source_lang or game.get("source_lang") or "en"
+    src_lang = source_lang or game.get("source_lang") or "en"
     slot_map = {s["slot_id"]: s for s in slots}
     if slots and (src_lang not in slot_map or not is_qwen_supported_lang(src_lang)):
         src_lang = _pick_default_source_lang(slots)
-    tgt_lang = req.target_lang or game.get("target_lang") or "vi"
+    tgt_lang = target_lang or game.get("target_lang") or "vi"
     if not is_qwen_supported_lang(tgt_lang):
         tgt_lang = "vi"
 
     extract_stats = {"raw_count": 0, "unique_count": 0, "dedup_saved_pct": 0.0, "ui_count": 0, "sub_count": 0, "tm_hits": 0, "estimates": {}}
+    external_source_info: Dict[str, Any] = {
+        "available": False,
+        "dir_path": str(_game_export_dir(game_id)),
+        "source_lang": src_lang,
+        "target_lang": tgt_lang,
+        "total_strings": 0,
+    }
     if src_lang in slot_map:
         extracted = await asyncio.to_thread(
             backup_mgr.extract_entries_preferring_backup,
@@ -1362,13 +1496,12 @@ async def api_scan_game(game_id: str, req: ScanRequest):
             game_dir,
             slot_map[src_lang],
             extract_slot_entries,
-            req.scope,
-            req.translate_choices,
+            scope,
+            translate_choices,
         )
-        # Always compute calibrated 3-preset estimates against FULL entries (and SUB_ONLY subset) before scope narrowing
         full_extracted = (
             extracted
-            if req.scope == "FULL_PATCH"
+            if scope == "FULL_PATCH"
             else await asyncio.to_thread(
                 backup_mgr.extract_entries_preferring_backup,
                 game_id,
@@ -1381,6 +1514,14 @@ async def api_scan_game(game_id: str, req: ScanRequest):
         )
         cache_db = GameCacheDB(game_id, APP_DIR / "cache")
         dedup = cache_db.store_extracted_entries(extracted["entries"], src_lang, tgt_lang, mask_tags)
+        external_source_info = await asyncio.to_thread(
+            _sync_external_source_snapshot,
+            game_id,
+            game,
+            cache_db,
+            src_lang,
+            tgt_lang,
+        )
         pending = cache_db.get_pending_strings(src_lang, tgt_lang)
         tm_hit_map = global_tm.lookup_exact_batch([e.text for e in full_extracted["entries"]], src_lang, tgt_lang)
         has_gloss = bool(cache_db.list_glossary_terms(src_lang, tgt_lang))
@@ -1407,6 +1548,10 @@ async def api_scan_game(game_id: str, req: ScanRequest):
     ranked = rank_inject_slots(slots, src_lang, tgt_lang)
     inject_slot = game.get("inject_slot") or (ranked[0]["slot_id"] if ranked else src_lang)
 
+    is_aes_enc = 1 if (loc_report.get("is_aes_encrypted") or final_aes_key) else int(game.get("is_aes_encrypted") or 0)
+    is_iostore = 1 if loc_report.get("is_iostore") else 0
+    has_sig = 1 if loc_report.get("has_pak_signature") else 0
+
     updated = library_db.update_fields(
         game_id,
         engine=loc_report.get("engine", game["engine"]),
@@ -1418,8 +1563,11 @@ async def api_scan_game(game_id: str, req: ScanRequest):
         source_lang=src_lang,
         target_lang=tgt_lang,
         inject_slot=inject_slot,
-        scope=req.scope,
-        aes_key=eff_aes_key.strip(),
+        scope=scope,
+        aes_key=final_aes_key or None,
+        is_aes_encrypted=is_aes_enc,
+        is_iostore=is_iostore,
+        has_pak_signature=has_sig,
         total_strings=extract_stats["unique_count"],
         translated_strings=extract_stats.get("done", 0),
         progress_pct=extract_stats.get("progress_pct", 0.0),
@@ -1429,7 +1577,145 @@ async def api_scan_game(game_id: str, req: ScanRequest):
     updated["has_backup"] = backup_mgr.has_backup(game_id, game_dir)
     updated["backup_info"] = backup_mgr.get_backup_info(game_id, game_dir)
     updated["cover_url"] = await _resolve_cover_url(updated, force_refresh=not bool(updated.get("cover_path") and Path(updated["cover_path"]).exists()))
-    return {"ok": True, "game": updated, "scan_stats": extract_stats, "anticheat": ac_report}
+    return {
+        "ok": True,
+        "game": updated,
+        "scan_stats": extract_stats,
+        "external_source": external_source_info,
+        "anticheat": ac_report,
+        "error_code": loc_report.get("error_code"),
+        "shipping_exe_path": loc_report.get("shipping_exe_path", ""),
+        "is_aes_encrypted": bool(is_aes_enc),
+        "is_iostore": bool(is_iostore),
+        "has_pak_signature": bool(has_sig),
+    }
+
+
+@app.post("/api/games/{game_id}/scan")
+async def api_scan_game(game_id: str, req: ScanRequest):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    return await _perform_game_scan(
+        game_id=game_id,
+        game=game,
+        source_lang=req.source_lang,
+        target_lang=req.target_lang,
+        scope=req.scope,
+        translate_choices=req.translate_choices,
+        aes_key=req.aes_key,
+    )
+
+
+@app.post("/api/games/{game_id}/unreal/aes-key")
+async def api_unreal_save_aes_key(game_id: str, req: UnrealAesKeyRequest):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    try:
+        norm_key = normalize_aes_key(req.aes_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    vr = await asyncio.to_thread(verify_unreal_aes_key, game["game_dir"], norm_key)
+    if not vr.get("ok"):
+        raise HTTPException(status_code=400, detail=vr.get("error") or "AES Key không khớp với file mã hóa của game này.")
+
+    library_db.update_fields(
+        game_id,
+        aes_key=norm_key,
+        is_aes_encrypted=1,
+        is_iostore=1 if vr.get("is_iostore") else 0,
+        has_pak_signature=1 if vr.get("has_pak_signature") else 0,
+    )
+    refreshed_game = library_db.get_game(game_id) or game
+    res = await _perform_game_scan(
+        game_id=game_id,
+        game=refreshed_game,
+        source_lang=refreshed_game.get("source_lang"),
+        target_lang=refreshed_game.get("target_lang") or "vi",
+        scope=refreshed_game.get("scope") or "FULL_PATCH",
+        translate_choices=bool(refreshed_game.get("translate_choices", 1)),
+        aes_key=norm_key,
+    )
+    res["aes_key"] = norm_key
+    return res
+
+
+@app.post("/api/games/{game_id}/unreal/auto-dump-aes")
+async def api_unreal_auto_dump_aes(game_id: str):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    try:
+        await tool_boot.ensure_tool("aesdumpster", force=False)
+    except Exception:
+        pass
+    dump_res = await asyncio.to_thread(auto_dump_unreal_aes_keys, game["game_dir"])
+    if dump_res.get("ok") and dump_res.get("aes_key"):
+        found_key = dump_res["aes_key"]
+        library_db.update_fields(
+            game_id,
+            aes_key=found_key,
+            is_aes_encrypted=1,
+            is_iostore=1 if dump_res.get("is_iostore") else 0,
+            has_pak_signature=1 if dump_res.get("has_pak_signature") else 0,
+        )
+        refreshed_game = library_db.get_game(game_id) or game
+        scan_res = await _perform_game_scan(
+            game_id=game_id,
+            game=refreshed_game,
+            source_lang=refreshed_game.get("source_lang"),
+            target_lang=refreshed_game.get("target_lang") or "vi",
+            scope=refreshed_game.get("scope") or "FULL_PATCH",
+            translate_choices=bool(refreshed_game.get("translate_choices", 1)),
+            aes_key=found_key,
+        )
+        scan_res["aes_key"] = found_key
+        return scan_res
+
+    library_db.update_fields(
+        game_id,
+        is_aes_encrypted=1,
+        is_iostore=1 if dump_res.get("is_iostore") else 0,
+        has_pak_signature=1 if dump_res.get("has_pak_signature") else 0,
+    )
+    return {
+        "ok": False,
+        "error_code": "AES_KEY_REQUIRED",
+        "shipping_exe_path": dump_res.get("shipping_exe_path", ""),
+        "is_iostore": bool(dump_res.get("is_iostore")),
+        "has_pak_signature": bool(dump_res.get("has_pak_signature")),
+        "message": dump_res.get("message") or "Không tìm thấy AES Key tự động (file .exe có thể bị bọc DRM). Hãy nhập khóa thủ công.",
+    }
+
+
+@app.post("/api/games/{game_id}/open-binaries")
+async def api_open_game_binaries(game_id: str):
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    info = await asyncio.to_thread(inspect_unreal_paks, game["game_dir"])
+    ship_exe = info.get("shipping_exe_path") or ""
+    gdir = Path(game["game_dir"])
+    target_dir = gdir
+    if ship_exe and Path(ship_exe).exists():
+        win64_exe = str(Path(ship_exe).resolve())
+        try:
+            subprocess.Popen(["explorer", f"/select,{win64_exe}"])
+            return {"ok": True, "path": win64_exe, "selected": True}
+        except Exception:
+            target_dir = Path(win64_exe).parent
+    else:
+        for pat in ("Binaries/Win64", "*/Binaries/Win64"):
+            hits = [p for p in gdir.glob(pat) if p.is_dir()]
+            if hits:
+                target_dir = hits[0]
+                break
+    if not target_dir.exists():
+        raise HTTPException(status_code=404, detail="Không tìm thấy thư mục Binaries/Win64 của game.")
+    os.startfile(str(target_dir))
+    return {"ok": True, "path": str(target_dir), "selected": False}
 
 
 @app.post("/api/games/{game_id}/launch")
@@ -2005,12 +2291,14 @@ async def api_game_monitor(game_id: str):
             profiler=hw_profiler,
         )
     dedup_summary = cache_db.get_dedup_summary(src, tgt)
+    ext_info = await asyncio.to_thread(_get_or_sync_external_source_info, game_id, game, cache_db, src, tgt)
     return {
         "recent_rows": cache_db.get_recent_translations(src, tgt, limit=100),
         "glossary_terms": cache_db.list_glossary_terms(src, tgt),
         "prethink": cache_db.get_latest_prethink(),
         "progress": cache_db.get_progress(src, tgt),
         "saved_translations": cache_db.list_saved_translations(),
+        "external_source": ext_info,
         "cache_db_path": str(cache_db.db_path),
         "backup_info": b_info,
         "estimates": estimates,
@@ -2062,10 +2350,170 @@ async def api_list_saved_translations(game_id: str):
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
     cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    src = game.get("source_lang") or "en"
+    tgt = game.get("target_lang") or "vi"
+    ext_info = await asyncio.to_thread(_get_or_sync_external_source_info, game_id, game, cache_db, src, tgt)
     return {
         "ok": True,
         "cache_db_path": str(cache_db.db_path),
         "saved_translations": cache_db.list_saved_translations(),
+        "external_source": ext_info,
+    }
+
+
+@app.get("/api/games/{game_id}/external-source/download")
+async def api_download_external_source(
+    game_id: str,
+    fmt: str = "json",
+    source_lang: Optional[str] = None,
+    target_lang: Optional[str] = None,
+):
+    game_id = _validate_safe_id(game_id, "game_id")
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    src = source_lang or game.get("source_lang") or "en"
+    tgt = target_lang or game.get("target_lang") or "vi"
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    snap = await asyncio.to_thread(_sync_external_source_snapshot, game_id, game, cache_db, src, tgt)
+    if not snap.get("available"):
+        raise HTTPException(status_code=400, detail="Chưa có dữ liệu ngôn ngữ gốc. Hãy quét game trước.")
+    fmt_clean = (fmt or "json").strip().lower()
+    if fmt_clean == "txt":
+        target_path = Path(snap["txt_path"])
+        media = "text/plain; charset=utf-8"
+        fname = snap["txt_filename"]
+    else:
+        target_path = Path(snap["json_path"])
+        media = "application/json; charset=utf-8"
+        fname = snap["json_filename"]
+    content = await asyncio.to_thread(target_path.read_bytes)
+    return Response(
+        content=content,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.post("/api/games/{game_id}/external-source/open-folder")
+async def api_open_external_source_folder(game_id: str):
+    game_id = _validate_safe_id(game_id, "game_id")
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    src = game.get("source_lang") or "en"
+    tgt = game.get("target_lang") or "vi"
+    await asyncio.to_thread(_get_or_sync_external_source_info, game_id, game, cache_db, src, tgt)
+    export_dir = _game_export_dir(game_id)
+    export_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        try:
+            os.startfile(str(export_dir))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Không mở được thư mục exports: {exc}")
+    return {"ok": True, "path": str(export_dir)}
+
+
+@app.post("/api/games/{game_id}/external-translation/import")
+async def api_import_external_translation(game_id: str, req: ExternalTranslationImportRequest):
+    game_id = _validate_safe_id(game_id, "game_id")
+    game = library_db.get_game(game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if _job_states.get(game_id, {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="Tiến trình cho game này đang chạy.")
+
+    b64_data = req.content_b64.split(",", 1)[1] if "," in req.content_b64 else req.content_b64
+    if len(b64_data) > int(_MAX_SAKUGAPACK_BYTES * 1.4):
+        raise HTTPException(status_code=413, detail="File bản dịch vượt quá giới hạn 32 MB.")
+    try:
+        raw_bytes = base64.b64decode(b64_data)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Không đọc được dữ liệu tải lên: {exc}")
+    if len(raw_bytes) > _MAX_SAKUGAPACK_BYTES:
+        raise HTTPException(status_code=413, detail="File bản dịch vượt quá giới hạn 32 MB.")
+
+    src = req.source_lang or game.get("source_lang") or "en"
+    tgt = req.target_lang or game.get("target_lang") or "vi"
+    cache_db = GameCacheDB(game_id, APP_DIR / "cache")
+    try:
+        imp = await asyncio.to_thread(
+            cache_db.import_external_translation_payload,
+            raw_bytes,
+            req.filename,
+            src,
+            tgt,
+            False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if int(imp.get("imported_strings") or 0) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Không tìm thấy câu dịch hợp lệ nào khớp với file gốc của game này (hoặc tất cả ô dịch đang trống).",
+        )
+
+    eff_src = imp.get("source_lang") or src
+    eff_tgt = imp.get("target_lang") or tgt
+    tm_pairs = imp.pop("tm_pairs", [])
+    if tm_pairs:
+        global_tm.upsert_batch(tm_pairs, eff_src, eff_tgt)
+
+    write_res = None
+    applied_blocked_anticheat = False
+    if req.auto_apply:
+        try:
+            applied = await _hot_apply_cached_game(
+                game_id,
+                game,
+                source_lang=eff_src,
+                target_lang=eff_tgt,
+                inject_slot_override=req.inject_slot,
+                patch_fonts=req.patch_fonts,
+                force_offline_override=req.force_offline_override,
+            )
+            write_res = applied["write_result"]
+            updated = applied["game"]
+            prog = applied["progress"]
+        except HTTPException as exc:
+            if exc.status_code != 403:
+                raise
+            applied_blocked_anticheat = True
+            prog = cache_db.get_progress(eff_src, eff_tgt)
+            updated = library_db.update_fields(
+                game_id,
+                source_lang=eff_src,
+                target_lang=eff_tgt,
+                total_strings=prog["total"],
+                translated_strings=prog["done"],
+                progress_pct=prog["pct"],
+            )
+            _hydrate_saved_translation_flags(updated)
+    else:
+        prog = cache_db.get_progress(eff_src, eff_tgt)
+        updated = library_db.update_fields(
+            game_id,
+            source_lang=eff_src,
+            target_lang=eff_tgt,
+            total_strings=prog["total"],
+            translated_strings=prog["done"],
+            progress_pct=prog["pct"],
+        )
+        _hydrate_saved_translation_flags(updated)
+
+    ext_info = await asyncio.to_thread(_get_or_sync_external_source_info, game_id, updated, cache_db, eff_src, eff_tgt)
+    emit_sse("saved_translation_applied", {"game_id": game_id, "source_lang": eff_src, "target_lang": eff_tgt})
+    return {
+        "ok": True,
+        **imp,
+        "applied_blocked_anticheat": applied_blocked_anticheat,
+        "progress": prog,
+        "write_result": write_res,
+        "saved_translations": cache_db.list_saved_translations(),
+        "external_source": ext_info,
+        "game": updated,
     }
 
 
@@ -2994,6 +3442,7 @@ async def api_events():
 
     async def event_stream():
         try:
+            await qwen_engine.fetch_ollama_ps()
             init_tele = await asyncio.to_thread(qwen_engine.get_telemetry)
             yield f"data: {json.dumps({'event': 'connected', 'data': {'ts': time.time(), 'telemetry': init_tele}})}\n\n"
             while True:
@@ -3001,6 +3450,7 @@ async def api_events():
                     msg = await asyncio.wait_for(q.get(), timeout=3.0)
                     yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
                 except asyncio.TimeoutError:
+                    await qwen_engine.fetch_ollama_ps()
                     tele = await asyncio.to_thread(qwen_engine.get_telemetry)
                     yield f"data: {json.dumps({'event': 'ping', 'data': {'telemetry': tele}})}\n\n"
         finally:

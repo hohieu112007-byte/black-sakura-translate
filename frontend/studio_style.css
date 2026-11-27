@@ -1202,6 +1202,8 @@ sakuga-button#btnStartTranslate {
 .badge { padding: 3px 8px; border-radius: 5px; font-size: 10.5px; font-weight: 700; border: 1px solid var(--border); background: var(--chip); }
 .badge-mono { font-family: var(--font-mono); }
 .badge-safe { color: var(--green); border-color: rgba(21, 128, 61, 0.35); background: rgba(21, 128, 61, 0.08); }
+.badge-warn { color: #d97706; border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.12); }
+html[data-theme="obsidian"] .badge-warn { color: #fbbf24; }
 .badge-danger { color: var(--red); border-color: rgba(220, 38, 38, 0.45); background: rgba(220, 38, 38, 0.08); }
 .ac-banner { margin: 14px 26px 0; background: rgba(220, 38, 38, 0.08); border: 1px solid var(--red); border-radius: 10px; padding: 11px 14px; color: var(--red); display: flex; flex-direction: column; gap: 7px; }
 
@@ -1519,6 +1521,14 @@ html[data-theme="obsidian"] .saved-pack-badge { color: #34d399; }
   display: flex;
   align-items: center;
   gap: 7px;
+}
+.external-source-meta {
+  padding: 8px 11px;
+  border-radius: 8px;
+  background: var(--chip);
+  border: 1px dashed var(--border);
+  color: var(--ink);
+  word-break: break-word;
 }
 
 /* ==================== 2-Layer Skill Hub & Hardware Profiler UI ==================== */
@@ -1983,6 +1993,36 @@ html[data-theme="obsidian"] .live-active-model-banner.role-main { color: #60a5fa
   min-width: 190px;
   font-family: var(--font-mono);
   font-size: 11.5px;
+}
+
+.badge-aes {
+  cursor: pointer;
+  border: 1px solid rgba(255, 196, 80, 0.45);
+  background: rgba(255, 196, 80, 0.14);
+  color: #ffd37a;
+  font-family: var(--font-mono);
+}
+
+.badge-aes:hover {
+  background: rgba(255, 196, 80, 0.24);
+}
+
+.badge-iostore {
+  border: 1px solid rgba(140, 175, 255, 0.38);
+  background: rgba(140, 175, 255, 0.12);
+  color: #b7d0ff;
+  font-family: var(--font-mono);
+}
+
+.sig-banner {
+  margin: 10px 26px 0;
+  padding: 9px 13px;
+  border-radius: 10px;
+  border: 1px solid rgba(245, 166, 35, 0.42);
+  background: rgba(245, 166, 35, 0.09);
+  color: #f6cf83;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 

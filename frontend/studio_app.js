@@ -444,13 +444,27 @@ async function toggleDualModel(enabled) {
 }
 
 function updateLiveTelemetryUI(tele = null, opts = {}) {
-  const workers = tele?.parallel_streams || state.hardware?.parallel_workers || 4;
+  const workers = (tele?.vram_guard_active && tele?.vram_guard_workers)
+    ? tele.vram_guard_workers
+    : (tele?.parallel_streams || state.hardware?.parallel_workers || 4);
   if (tele && typeof tele === "object") {
     const used = Number(tele.vram_used_gb || 0).toFixed(1);
     const total = Number(tele.vram_total_gb || 8).toFixed(1);
-    const vramTxt = `VRAM: ${used} / ${total} GB`;
-    if ($("teleVram")) $("teleVram").textContent = vramTxt;
-    if ($("progLiveVram")) $("progLiveVram").textContent = vramTxt;
+    const offloadTag = (tele.gpu_offload_pct !== null && tele.gpu_offload_pct !== undefined)
+      ? ` • ${tele.cpu_spillover ? "⚠ " : ""}${Math.round(Number(tele.gpu_offload_pct))}% GPU`
+      : "";
+    const vramTxt = `VRAM: ${used} / ${total} GB${offloadTag}`;
+    const guardTitle = (tele.vram_guard_active && tele.vram_guard_note) ? String(tele.vram_guard_note) : "";
+    if ($("teleVram")) {
+      $("teleVram").textContent = vramTxt;
+      if (guardTitle) $("teleVram").title = guardTitle;
+      else $("teleVram").removeAttribute("title");
+    }
+    if ($("progLiveVram")) {
+      $("progLiveVram").textContent = vramTxt;
+      if (guardTitle) $("progLiveVram").title = guardTitle;
+      else $("progLiveVram").removeAttribute("title");
+    }
     if (tele.model) {
       if ($("activeModelShortLabel")) $("activeModelShortLabel").textContent = tele.model;
       if ($("prethinkModelLabel")) $("prethinkModelLabel").textContent = tele.model;
@@ -463,8 +477,9 @@ function updateLiveTelemetryUI(tele = null, opts = {}) {
   if (typeof opts.tokensDone === "number" || typeof opts.tokPerSec === "number") {
     const tokFmt = Number(state.sessionTokens || 0).toLocaleString("vi-VN");
     const tpsFmt = Number(state.lastTokPerSec || 0).toFixed(1);
+    const poolPrefix = tele?.vram_guard_active ? "🛡️ " : "";
     if ($("progLiveTokens")) $("progLiveTokens").textContent = `Token: ${tokFmt} (${tpsFmt} tok/s)`;
-    if ($("teleSpeed")) $("teleSpeed").textContent = `${tpsFmt} tok/s • ${tokFmt} tok • ${workers}x Pool`;
+    if ($("teleSpeed")) $("teleSpeed").textContent = `${tpsFmt} tok/s • ${tokFmt} tok • ${poolPrefix}${workers}x Pool`;
   }
   if (typeof opts.running === "boolean" && $("progLiveDot")) {
     $("progLiveDot").className = `dot ${
@@ -1075,6 +1090,20 @@ async function renderSelectedGamePage() {
 
   $("heroLaunchBadge").textContent = g.launch_mode === "steam" && g.steam_appid ? `STEAM • ${g.steam_appid}` : g.launch_mode.toUpperCase();
   $("heroEngineBadge").textContent = g.engine || "Unknown Engine";
+  const isUnreal = String(g.engine || "").toLowerCase().includes("unreal");
+  const isIoStore = isUnreal && Boolean(Number(g.is_iostore));
+  const isAesEnc = isUnreal && (Boolean(Number(g.is_aes_encrypted)) || Boolean((g.aes_key || "").trim()));
+  const hasSig = isUnreal && Boolean(Number(g.has_pak_signature));
+  $("heroIoStoreBadge")?.classList.toggle("hidden", !isIoStore);
+  const aesBadge = $("heroAesBadge");
+  if (aesBadge) {
+    aesBadge.classList.toggle("hidden", !isAesEnc);
+    const hasKey = Boolean((g.aes_key || "").trim());
+    aesBadge.textContent = hasKey
+      ? (state.uiLang === "en" ? "🔑 AES Unlocked" : "🔑 AES Đã mở khóa")
+      : (state.uiLang === "en" ? "🔒 AES Key Needed" : "🔒 Cần AES Key");
+  }
+  $("unrealSigBanner")?.classList.toggle("hidden", !hasSig);
   $("studioEngineMethod").textContent = `${g.engine} • ${g.method || "--"}`;
   $("selectLaunchMode").value = g.launch_mode || "direct_exe";
 
@@ -1656,8 +1685,94 @@ async function refreshStudioMonitor(gameId) {
       const sp = $("sakugaProgressBar");
       if (sp?.set) (pct <= 0 && sp.value > 0) ? sp.reset() : sp.set(pct / 100.0, true);
     }
+    renderExternalSourceCard(mon.external_source || null, selectedGame());
     renderSavedTranslations(mon.saved_translations || [], mon.cache_db_path || "", selectedGame());
   } catch (_) {}
+}
+
+function renderExternalSourceCard(extInfo, game) {
+  const metaEl = $("externalSourceMeta");
+  const btnJson = $("btnDownloadExternalJson");
+  const btnTxt = $("btnDownloadExternalTxt");
+  const btnOpen = $("btnOpenExternalFolder");
+  const btnImp = $("btnImportExternalTranslation");
+  const ready = Boolean(game && extInfo && extInfo.available && (extInfo.total_strings || 0) > 0);
+  if (btnJson) btnJson.disabled = !ready;
+  if (btnTxt) btnTxt.disabled = !ready;
+  if (btnOpen) btnOpen.disabled = !game;
+  if (btnImp) btnImp.disabled = !game;
+  if (!metaEl) return;
+  if (!game) {
+    metaEl.textContent = "Chọn một game để xem hoặc xuất file nguồn chưa dịch.";
+    return;
+  }
+  if (!ready) {
+    metaEl.textContent = `Chưa có file nguồn — hãy bấm ↻ Quét lại game (${game.title || game.game_id}).`;
+    return;
+  }
+  const kb = extInfo.size_bytes ? ` • ${(extInfo.size_bytes / 1024).toFixed(1)} KB` : "";
+  const srcLbl = getLangDisplayLabel(extInfo.source_lang || game.source_lang || "en");
+  metaEl.innerHTML = `
+    ✅ Sẵn sàng: <strong>${escapeHtml(extInfo.json_filename || "source.json")}</strong> (${(extInfo.total_strings || 0).toLocaleString("vi-VN")} câu • Nguồn: ${escapeHtml(srcLbl)}${kb})
+    <div style="opacity:0.78;margin-top:3px;">📁 Đã tự lưu tại: <code>${escapeHtml(extInfo.dir_path || `exports/${game.game_id}`)}</code></div>
+  `;
+}
+
+function downloadExternalSource(format = "json") {
+  const g = selectedGame();
+  if (!g) return;
+  const src = g.source_lang || "en";
+  const tgt = g.target_lang || "vi";
+  const url = `/api/games/${encodeURIComponent(g.game_id)}/external-source/download?fmt=${encodeURIComponent(format)}&source_lang=${encodeURIComponent(src)}&target_lang=${encodeURIComponent(tgt)}`;
+  window.open(url, "_blank");
+  showToast(`Đang tải file nguồn gốc (.${format}) [${src}]...`);
+}
+
+async function openExternalSourceFolder() {
+  const g = selectedGame();
+  if (!g) return;
+  try {
+    await api(`/api/games/${encodeURIComponent(g.game_id)}/external-source/open-folder`, { method: "POST" });
+  } catch (err) {
+    showToast(`Không mở được thư mục exports: ${err.message}`, "error");
+  }
+}
+
+async function importExternalTranslationFile(file) {
+  const g = selectedGame();
+  if (!g || !file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      showToast("Đang nhập bản dịch ngoài & chèn thẳng vào game...");
+      const res = await api(`/api/games/${encodeURIComponent(g.game_id)}/external-translation/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: file.name,
+          content_b64: String(reader.result || ""),
+          source_lang: g.source_lang || null,
+          target_lang: g.target_lang || null,
+          auto_apply: true,
+          inject_slot: state.injectSlot || null,
+          patch_fonts: Boolean($("chkPatchFonts")?.checked ?? true),
+          force_offline_override: Boolean($("chkOfflineOverride")?.checked),
+        }),
+      });
+      await loadGames(g.game_id);
+      const cnt = res.imported_strings || 0;
+      const skipped = (res.skipped_placeholder_mismatch || 0) + (res.skipped_unmatched || 0);
+      const warnSuffix = skipped > 0 ? ` (bỏ qua ${skipped} dòng lệch ID/tag)` : "";
+      if (res.applied_blocked_anticheat) {
+        showToast(`Đã lưu ${cnt} câu vào kho DB${warnSuffix}, nhưng game đang bị Anti-Cheat Guard khóa ghi file.`);
+      } else {
+        showToast(`Đã nhập ${cnt} câu từ bản dịch ngoài & cài vào game ✓${warnSuffix}`);
+      }
+    } catch (err) {
+      showToast(`Lỗi nhập bản dịch ngoài: ${err.message}`, "error");
+    }
+  };
+  reader.readAsDataURL(file);
 }
 
 function renderSavedTranslations(savedList, cacheDbPath, game) {
@@ -2139,6 +2254,9 @@ async function scanSelectedGame(opts = {}) {
     });
     renderPresetEstimates(res.scan_stats?.estimates);
     await loadGames(g.game_id);
+    if (!isSilent && res?.error_code === "AES_KEY_REQUIRED") {
+      openUnrealAesModal(res.game || g, "", res.shipping_exe_path || "");
+    }
     const foundCount = res?.game?.detected_slots?.length || 0;
     if (!isSilent) {
       showToast(
@@ -2151,6 +2269,109 @@ async function scanSelectedGame(opts = {}) {
     if (!isSilent) showToast(err.message, "error");
   } finally {
     for (const b of rescanBtns) b.disabled = Boolean(state.jobRunning);
+  }
+}
+
+function openUnrealAesModal(gameObj = null, msgText = "", shippingExe = "") {
+  const g = gameObj || selectedGame();
+  if (!g) return;
+  const modal = $("modalUnrealAes");
+  if (!modal) return;
+  if ($("inpModalUnrealAesKey")) $("inpModalUnrealAesKey").value = g.aes_key || "";
+  if ($("unrealShippingExeHint")) {
+    $("unrealShippingExeHint").textContent = shippingExe ? `Shipping EXE: ${shippingExe}` : "";
+  }
+  const msgEl = $("unrealAesModalMsg");
+  if (msgEl) {
+    msgEl.classList.toggle("hidden", !msgText);
+    msgEl.textContent = msgText || "";
+  }
+  modal.classList.remove("hidden");
+  setTimeout(() => $("inpModalUnrealAesKey")?.focus?.(), 40);
+}
+
+async function submitUnrealAesKey(rawKey) {
+  const g = selectedGame();
+  if (!g) return;
+  const key = String(rawKey || "").trim();
+  const msgEl = $("unrealAesModalMsg");
+  if (!key) {
+    const err = state.uiLang === "en" ? "Please enter a 256-bit AES key." : "Hãy nhập khóa AES 256-bit trước.";
+    if (msgEl && !$("modalUnrealAes")?.classList.contains("hidden")) {
+      msgEl.classList.remove("hidden");
+      msgEl.textContent = err;
+    }
+    showToast(err, "error");
+    return;
+  }
+  const saveBtn = $("btnModalSaveUnrealAes");
+  if (saveBtn) saveBtn.disabled = true;
+  try {
+    const res = await api(`/api/games/${g.game_id}/unreal/aes-key`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ aes_key: key }),
+    });
+    renderPresetEstimates(res.scan_stats?.estimates);
+    $("modalUnrealAes")?.classList.add("hidden");
+    await loadGames(g.game_id);
+    const cnt = res?.game?.detected_slots?.length || 0;
+    showToast(
+      state.uiLang === "en"
+        ? `AES unlocked & saved (${cnt} language slots)!`
+        : `Đã mở khóa AES & quét được ${cnt} ngôn ngữ!`,
+    );
+  } catch (err) {
+    if (msgEl && !$("modalUnrealAes")?.classList.contains("hidden")) {
+      msgEl.classList.remove("hidden");
+      msgEl.textContent = err.message;
+    }
+    showToast(err.message, "error");
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+async function runAutoDumpUnrealAes() {
+  const g = selectedGame();
+  if (!g) return;
+  const btn = $("btnModalAutoDumpAes");
+  const msgEl = $("unrealAesModalMsg");
+  if (btn) btn.disabled = true;
+  if (msgEl) {
+    msgEl.classList.remove("hidden");
+    msgEl.textContent = state.uiLang === "en"
+      ? "Running AESDumpster on Win64-Shipping.exe..."
+      : "Đang quét tĩnh Win64-Shipping.exe bằng AESDumpster...";
+  }
+  try {
+    const res = await api(`/api/games/${g.game_id}/unreal/auto-dump-aes`, { method: "POST" });
+    if (res.ok) {
+      renderPresetEstimates(res.scan_stats?.estimates);
+      $("modalUnrealAes")?.classList.add("hidden");
+      await loadGames(g.game_id);
+      const cnt = res?.game?.detected_slots?.length || 0;
+      showToast(
+        state.uiLang === "en"
+          ? `Found AES key automatically (${cnt} slots)!`
+          : `Đã dò tự động AES Key thành công (${cnt} ngôn ngữ)!`,
+      );
+    } else {
+      if ($("unrealShippingExeHint") && res.shipping_exe_path) {
+        $("unrealShippingExeHint").textContent = `Shipping EXE: ${res.shipping_exe_path}`;
+      }
+      if (msgEl) {
+        msgEl.classList.remove("hidden");
+        msgEl.textContent = res.message || "Không tìm thấy AES Key tự động.";
+      }
+    }
+  } catch (err) {
+    if (msgEl) {
+      msgEl.classList.remove("hidden");
+      msgEl.textContent = err.message;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -2504,10 +2725,17 @@ async function openHardwareModal() {
     state.hardware = hwEff;
     state.ollamaStatus = mdlRes || {};
     const probe = hwEff.hardware || {};
+    const ps = mdlRes.ollama_ps || {};
+    const offloadBadge = (ps.gpu_offload_pct !== null && ps.gpu_offload_pct !== undefined)
+      ? `<span class="badge ${ps.cpu_spillover ? "badge-warn" : "badge-safe"}">${ps.cpu_spillover ? "⚠ " : ""}${Math.round(Number(ps.gpu_offload_pct))}% GPU</span>`
+      : "";
     $("hwDetectedSummary").innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
         <span>🖥️ <strong>${escapeHtml(probe.gpu_name || "CPU Mode")}</strong> • <strong>${probe.vram_total_gb || 0} GB VRAM</strong> • RAM <strong>${probe.ram_total_gb || 0} GB</strong></span>
-        <span class="badge badge-safe">${escapeHtml(probe.tier_label || hwEff.tier)} (${hwEff.parallel_workers || 4} luồng)</span>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          ${offloadBadge}
+          <span class="badge badge-safe">${escapeHtml(probe.tier_label || hwEff.tier)} (${hwEff.parallel_workers || 4} luồng)</span>
+        </div>
       </div>
     `;
 
@@ -2548,6 +2776,7 @@ async function openHardwareModal() {
     $("dualModelRow").classList.toggle("hidden", !Boolean(hwEff.dual_model_enabled));
     $("chkAutoTuneHw").checked = hwEff.auto_tune !== false;
     if ($("chkQuietModeHw")) $("chkQuietModeHw").checked = Boolean(hwEff.quiet_mode);
+    if ($("chkLowRamModeHw")) $("chkLowRamModeHw").checked = hwEff.low_ram_mode !== false;
     if ($("hwAdvancedDetails")) $("hwAdvancedDetails").open = hwEff.auto_tune === false;
     $("sliderParallelWorkers").value = hwEff.parallel_workers || 4;
     $("valParallelWorkers").textContent = String(hwEff.parallel_workers || 4);
@@ -2632,6 +2861,7 @@ async function saveHardwareSettings() {
     const payload = {
       auto_tune: $("chkAutoTuneHw").checked,
       quiet_mode: Boolean($("chkQuietModeHw")?.checked),
+      low_ram_mode: Boolean($("chkLowRamModeHw")?.checked ?? true),
       main_model: $("selectMainModel").value,
       dual_model_enabled: $("chkDualModel").checked,
       ui_fast_model: $("selectUiFastModel").value,
@@ -2746,6 +2976,9 @@ async function addGameByPath(path) {
     switchView("game");
     await loadGames(res.game.game_id);
     showToast(`Đã thêm ${res.game.title}`);
+    if (res.error_code === "AES_KEY_REQUIRED") {
+      openUnrealAesModal(res.game, "", res.shipping_exe_path || "");
+    }
   } catch (err) {
     showToast(err.message, "error");
   }
@@ -2955,6 +3188,15 @@ function bindEvents() {
   $("inpImportSakugaPackFile")?.addEventListener("change", async (e) => {
     const file = e.target.files?.[0];
     if (file) await importSakugaPackFile(file);
+    e.target.value = "";
+  });
+  $("btnDownloadExternalJson")?.addEventListener("click", () => downloadExternalSource("json"));
+  $("btnDownloadExternalTxt")?.addEventListener("click", () => downloadExternalSource("txt"));
+  $("btnOpenExternalFolder")?.addEventListener("click", openExternalSourceFolder);
+  $("btnImportExternalTranslation")?.addEventListener("click", () => $("inpImportExternalFile")?.click());
+  $("inpImportExternalFile")?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (file) await importExternalTranslationFile(file);
     e.target.value = "";
   });
   $("btnRunDeltaUpdate")?.addEventListener("click", runDeltaUpdate);
@@ -3215,11 +3457,30 @@ function bindEvents() {
   $("btnRescanGame")?.addEventListener("click", () => scanSelectedGame());
   $("btnQuickRescan")?.addEventListener("click", () => scanSelectedGame());
   $("btnDiagRescan")?.addEventListener("click", () => scanSelectedGame());
-  $("btnUnlockUnrealAes")?.addEventListener("click", () => scanSelectedGame({ aesKey: $("inpUnrealAesKey")?.value || "" }));
+  $("heroAesBadge")?.addEventListener("click", () => openUnrealAesModal(selectedGame()));
+  $("btnCloseUnrealAesModal")?.addEventListener("click", () => $("modalUnrealAes")?.classList.add("hidden"));
+  $("btnModalSaveUnrealAes")?.addEventListener("click", () => submitUnrealAesKey($("inpModalUnrealAesKey")?.value || ""));
+  $("btnModalAutoDumpAes")?.addEventListener("click", () => runAutoDumpUnrealAes());
+  $("btnModalOpenBinaries")?.addEventListener("click", async () => {
+    const g = selectedGame();
+    if (!g) return;
+    try {
+      await api(`/api/games/${g.game_id}/open-binaries`, { method: "POST" });
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+  });
+  $("inpModalUnrealAesKey")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submitUnrealAesKey($("inpModalUnrealAesKey")?.value || "");
+    }
+  });
+  $("btnUnlockUnrealAes")?.addEventListener("click", () => submitUnrealAesKey($("inpUnrealAesKey")?.value || ""));
   $("inpUnrealAesKey")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      scanSelectedGame({ aesKey: $("inpUnrealAesKey")?.value || "" });
+      submitUnrealAesKey($("inpUnrealAesKey")?.value || "");
     }
   });
   $("selectLaunchMode").addEventListener("change", async (e) => {

@@ -8,7 +8,7 @@ import re
 import time
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import psutil
 
@@ -34,7 +34,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "dual_model_enabled": False,
     "ui_fast_model": "qwen3:1.7b",
     "quiet_mode": False,
-    "parallel_workers": 5,
+    "low_ram_mode": True,
+    "parallel_workers": 4,
     "num_ctx": 2048,
     "kv_cache_type": "q8_0",
     "ui_batch_size": 80,
@@ -107,13 +108,13 @@ def classify_hardware_tier(
         return {
             "tier": "BALANCED_8GB",
             "tier_label": "Auto 8GB",
-            "parallel_workers": 5,
+            "parallel_workers": 4,
             "num_ctx": 2048,
             "kv_cache_type": "q8_0",
             "ui_batch_size": 80,
             "sub_batch_size": 25,
             "recommended_models": [
-                {"name": "qwen3.5:4b", "size_gb": 2.7, "desc": "Tối ưu tốc độ & chất lượng cho 8GB VRAM (5 luồng)"},
+                {"name": "qwen3.5:4b", "size_gb": 2.7, "desc": "Tối ưu tốc độ & chất lượng cho 8GB VRAM (4 luồng)"},
                 {"name": "qwen3:8b", "size_gb": 4.9, "desc": "Model 8B văn phong sâu cho 8GB VRAM"},
                 {"name": "qwen3:1.7b", "size_gb": 1.4, "desc": "Model phụ Dual-Model dịch UI cực nhanh"},
             ],
@@ -133,6 +134,31 @@ def classify_hardware_tier(
             {"name": "qwen3.5:4b", "size_gb": 2.7, "desc": "Siêu tốc 8 luồng hoặc Dual-Model UI"},
         ],
     }
+
+
+def cap_workers_for_free_vram(
+    requested_workers: int,
+    has_nvidia_gpu: bool,
+    vram_total_gb: float,
+    vram_free_gb: float,
+) -> Tuple[int, str]:
+    """Clamp starting concurrency when available free VRAM is already tight."""
+    req = max(1, int(requested_workers or 1))
+    if not has_nvidia_gpu or vram_total_gb <= 0.5 or vram_free_gb <= 0.0:
+        return req, ""
+    if vram_free_gb < 3.3:
+        cap = 1
+        note = f"VRAM trống thấp ({vram_free_gb:.1f} GB) → khởi chạy 1 luồng" if cap < req else ""
+        return cap, note
+    if vram_free_gb < 4.5:
+        cap = min(req, 2)
+        note = f"VRAM trống {vram_free_gb:.1f} GB → tự giới hạn {cap} luồng" if cap < req else ""
+        return cap, note
+    if vram_free_gb < 5.8:
+        cap = min(req, 3)
+        note = f"VRAM trống {vram_free_gb:.1f} GB → tự giới hạn {cap} luồng" if cap < req else ""
+        return cap, note
+    return req, ""
 
 
 class HardwareProfiler:
@@ -229,7 +255,8 @@ class HardwareProfiler:
         cfg["auto_tune"] = bool(cfg.get("auto_tune", True))
         cfg["dual_model_enabled"] = bool(cfg.get("dual_model_enabled", False))
         cfg["quiet_mode"] = bool(cfg.get("quiet_mode", False))
-        cfg["parallel_workers"] = max(1, min(12, int(cfg.get("parallel_workers", 5))))
+        cfg["low_ram_mode"] = bool(cfg.get("low_ram_mode", True))
+        cfg["parallel_workers"] = max(1, min(12, int(cfg.get("parallel_workers", 4))))
         cfg["num_ctx"] = max(1024, min(8192, int(cfg.get("num_ctx", 2048))))
         cfg["ui_batch_size"] = max(10, min(150, int(cfg.get("ui_batch_size", 80))))
         cfg["sub_batch_size"] = max(5, min(60, int(cfg.get("sub_batch_size", 25))))
@@ -246,6 +273,7 @@ class HardwareProfiler:
         cur["auto_tune"] = bool(cur.get("auto_tune", True))
         cur["dual_model_enabled"] = bool(cur.get("dual_model_enabled", False))
         cur["quiet_mode"] = bool(cur.get("quiet_mode", False))
+        cur["low_ram_mode"] = bool(cur.get("low_ram_mode", True))
         cur["parallel_workers"] = max(1, min(12, int(cur["parallel_workers"])))
         cur["num_ctx"] = max(1024, min(8192, int(cur["num_ctx"])))
         cur["ui_batch_size"] = max(10, min(150, int(cur["ui_batch_size"])))
@@ -294,7 +322,12 @@ class HardwareProfiler:
             "OLLAMA_KV_CACHE_TYPE": str(eff["kv_cache_type"]),
             "OLLAMA_FLASH_ATTENTION": "1",
             "OLLAMA_KEEP_ALIVE": "10m",
+            "OLLAMA_MAX_LOADED_MODELS": "1",
         }
+        if eff.get("low_ram_mode", True):
+            env_updates["OLLAMA_NO_MMAP"] = "1"
+        else:
+            os.environ.pop("OLLAMA_NO_MMAP", None)
         for k, v in env_updates.items():
             os.environ[k] = v
         return env_updates

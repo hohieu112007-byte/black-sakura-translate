@@ -551,6 +551,12 @@ async def ingest_game_input(raw_path: str | Path, covers_dir: Path = COVERS_DIR)
         "anticheat_vendors": ac_report["detected_ac"],
         "anticheat_files": ac_report["matched_files"],
         "detected_slots": loc_report.get("slots", []),
+        "aes_key": loc_report.get("discovered_aes_key", ""),
+        "is_aes_encrypted": 1 if loc_report.get("is_aes_encrypted") else 0,
+        "is_iostore": 1 if loc_report.get("is_iostore") else 0,
+        "has_pak_signature": 1 if loc_report.get("has_pak_signature") else 0,
+        "shipping_exe_path": loc_report.get("shipping_exe_path", ""),
+        "error_code": loc_report.get("error_code"),
     }
 
 

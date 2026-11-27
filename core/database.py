@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 import sqlite3
 import time
+import zipfile
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from rapidfuzz import fuzz
 
 from core import get_app_dir
+from core.atomic_io import atomic_write_text
 from safety_shield.tag_firewall import fold_source_numbers, mask_tags, unfold_numbers
 
 APP_DIR = get_app_dir(__file__)
@@ -28,7 +32,8 @@ _ALLOWED_GAME_COLUMNS = {
     "style_skill_id", "lang_skill_override", "applied_skill_signature", "engine", "method",
     "anticheat_status", "anticheat_vendors", "anticheat_files", "detected_slots_json",
     "source_lang", "target_lang", "inject_slot", "scope",
-    "preset_level", "ai_mode", "translate_choices", "keep_proper_nouns", "patch_fonts", "aes_key",
+    "preset_level", "ai_mode", "translate_choices", "keep_proper_nouns", "patch_fonts",
+    "aes_key", "is_aes_encrypted", "is_iostore", "has_pak_signature",
     "total_strings", "translated_strings", "progress_pct", "is_patched", "last_played_at", "updated_at",
 }
 
@@ -77,7 +82,10 @@ class LibraryDB:
                     translate_choices INTEGER DEFAULT 1,
                     keep_proper_nouns INTEGER DEFAULT 1,
                     patch_fonts INTEGER DEFAULT 1,
-                    aes_key TEXT DEFAULT '',
+                    aes_key TEXT DEFAULT NULL,
+                    is_aes_encrypted INTEGER DEFAULT 0,
+                    is_iostore INTEGER DEFAULT 0,
+                    has_pak_signature INTEGER DEFAULT 0,
                     game_description TEXT DEFAULT '',
                     tone_preset TEXT DEFAULT 'natural',
                     style_skill_id TEXT DEFAULT 'natural_standard',
@@ -108,7 +116,10 @@ class LibraryDB:
                 ("translate_choices", "INTEGER DEFAULT 1"),
                 ("keep_proper_nouns", "INTEGER DEFAULT 1"),
                 ("patch_fonts", "INTEGER DEFAULT 1"),
-                ("aes_key", "TEXT DEFAULT ''"),
+                ("aes_key", "TEXT DEFAULT NULL"),
+                ("is_aes_encrypted", "INTEGER DEFAULT 0"),
+                ("is_iostore", "INTEGER DEFAULT 0"),
+                ("has_pak_signature", "INTEGER DEFAULT 0"),
             ):
                 if col_name not in existing_cols:
                     conn.execute(f"ALTER TABLE games ADD COLUMN {col_name} {col_def}")
@@ -170,7 +181,10 @@ class LibraryDB:
                     "translate_choices": int(record.get("translate_choices", 1)),
                     "keep_proper_nouns": int(record.get("keep_proper_nouns", 1)),
                     "patch_fonts": int(record.get("patch_fonts", 1)),
-                    "aes_key": record.get("aes_key", ""),
+                    "aes_key": record.get("aes_key") or None,
+                    "is_aes_encrypted": int(record.get("is_aes_encrypted", 0) or 0),
+                    "is_iostore": int(record.get("is_iostore", 0) or 0),
+                    "has_pak_signature": int(record.get("has_pak_signature", 0) or 0),
                     "game_description": record.get("game_description", ""),
                     "tone_preset": record.get("tone_preset") or "natural",
                     "style_skill_id": record.get("style_skill_id") or record.get("tone_preset") or "natural_standard",
@@ -412,6 +426,48 @@ class GlobalTMDB:
                 conn.execute(f"DELETE FROM tm_entries WHERE id IN ({ph})", chunk)
             conn.commit()
         return len(bad_ids)
+
+
+_EXT_NUM_TOK_RE = re.compile(r"__NUM_(\d+)__")
+_MAX_EXT_IMPORT_BYTES = 32 * 1024 * 1024
+
+
+def format_external_source_txt(data: Dict[str, Any]) -> str:
+    """Format sakuga_external_v1 source entries into an editable short_id|text file."""
+    meta = data.get("game_meta") or {}
+    title = str(meta.get("title") or meta.get("game_id") or "Game")
+    src = str(data.get("source_lang") or "en")
+    tgt = str(data.get("target_lang") or "vi")
+    total = int(data.get("total_strings") or len(data.get("entries") or []))
+    lines = [
+        "# Sakuga External Translation Source (format: short_id|text)",
+        f"# Game: {title} | Source: {src} -> Target: {tgt} | Total: {total}",
+        "# Keep <short_id>| prefix and all tags/placeholders (__NUM_0__, {0}, %s, <...>, \\n) intact.",
+        "",
+    ]
+    for entry in data.get("entries") or []:
+        raw_txt = str(entry.get("source") or "")
+        escaped = raw_txt.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "\\t").replace("\n", "\\n")
+        lines.append(f"{entry.get('short_id') or entry.get('id')}|{escaped}")
+    return "\n".join(lines) + "\n"
+
+
+def _repair_external_tokens(text: str) -> str:
+    txt = re.sub(r"__\s*TAG_(\d+)\s*__", r"__TAG_\1__", text)
+    txt = re.sub(r"__\s*NUM_(\d+)\s*__", r"__NUM_\1__", txt)
+    txt = re.sub(r"__\s*NL\s*__", "__NL__", txt)
+    return txt
+
+
+def _safe_zip_read_external(zf: zipfile.ZipFile, member_name: str, max_bytes: int = _MAX_EXT_IMPORT_BYTES) -> bytes:
+    info = zf.getinfo(member_name)
+    if info.file_size > max_bytes:
+        raise ValueError(f"File nén '{member_name}' vượt quá giới hạn an toàn ({max_bytes // (1024 * 1024)} MB).")
+    with zf.open(info, "r") as fp:
+        data = fp.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f"File nén '{member_name}' vượt quá giới hạn giải nén cho phép.")
+    return data
 
 
 class GameCacheDB:
@@ -1307,6 +1363,305 @@ class GameCacheDB:
             "imported_glossary": len(gl_list),
             "source_lang": src,
             "target_lang": tgt,
+        }
+
+    def export_external_source_data(
+        self,
+        source_lang: str,
+        target_lang: str,
+        game_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Export full untranslated unique source strings (sakuga_external_v1) for external AI translation."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT u.str_hash, u.category, u.source_text, MIN(l.entry_key) AS entry_key
+                FROM unique_strings u
+                LEFT JOIN string_locations l ON u.str_hash = l.str_hash
+                WHERE u.source_lang=? AND u.target_lang=?
+                GROUP BY u.str_hash
+                ORDER BY CASE u.category WHEN 'UI' THEN 0 WHEN 'CHOICE' THEN 1 ELSE 2 END, u.rowid
+                """,
+                (source_lang, target_lang),
+            ).fetchall()
+        entries = [
+            {
+                "id": r["str_hash"],
+                "short_id": str(r["str_hash"]).split(":")[-1][:10],
+                "category": r["category"] or "UI",
+                "key": r["entry_key"] or "",
+                "source": r["source_text"],
+                "translation": "",
+            }
+            for r in rows
+        ]
+        return {
+            "format": "sakuga_external_v1",
+            "exported_at": int(time.time()),
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "game_meta": game_meta or {},
+            "total_strings": len(entries),
+            "instructions": (
+                "Translate ONLY the 'translation' field into target_lang. "
+                "Keep 'id', 'short_id', 'source', and all placeholders/tags (__NUM_0__, {0}, %s, <color=...>, \\n) intact."
+            ),
+            "entries": entries,
+        }
+
+    def write_external_source_snapshot(
+        self,
+        export_dir: Path,
+        safe_slug: str,
+        source_lang: str,
+        target_lang: str,
+        game_meta: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Persist untranslated JSON + TXT source snapshot into <app_dir>/exports/<game_id>/."""
+        data = self.export_external_source_data(source_lang, target_lang, game_meta=game_meta)
+        if not data.get("total_strings"):
+            return None
+        export_dir = Path(export_dir)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        slug = (safe_slug or "game").strip("._") or "game"
+        json_path = export_dir / f"{slug}_{source_lang}_source.json"
+        txt_path = export_dir / f"{slug}_{source_lang}_source.txt"
+        atomic_write_text(json_path, json.dumps(data, ensure_ascii=False, indent=2))
+        atomic_write_text(txt_path, format_external_source_txt(data))
+        return {
+            "available": True,
+            "dir_path": str(export_dir),
+            "json_path": str(json_path),
+            "txt_path": str(txt_path),
+            "json_filename": json_path.name,
+            "txt_filename": txt_path.name,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "total_strings": int(data["total_strings"]),
+            "size_bytes": int(json_path.stat().st_size),
+            "updated_at": int(data["exported_at"]),
+        }
+
+    def import_external_translation_payload(
+        self,
+        raw_bytes: bytes,
+        filename: str,
+        source_lang: str,
+        target_lang: str,
+        overwrite_locked: bool = False,
+    ) -> Dict[str, Any]:
+        """Import externally translated JSON, TXT, TSV, or ZIP/sakugapack into unique_strings cache."""
+        if len(raw_bytes) > _MAX_EXT_IMPORT_BYTES:
+            raise ValueError("File bản dịch ngoài vượt quá giới hạn 32 MB.")
+
+        payload_bytes = raw_bytes
+        if payload_bytes[:2] == b"PK":
+            with zipfile.ZipFile(io.BytesIO(payload_bytes), "r") as zf:
+                names = zf.namelist()
+                target_name = "pack.json" if "pack.json" in names else next(
+                    (n for n in names if n.lower().endswith(".json")), ""
+                )
+                if not target_name:
+                    target_name = next((n for n in names if n.lower().endswith((".txt", ".tsv"))), "")
+                if not target_name:
+                    raise ValueError("File nén không chứa .json, .txt hoặc .tsv hợp lệ.")
+                payload_bytes = _safe_zip_read_external(zf, target_name, _MAX_EXT_IMPORT_BYTES)
+
+        text_content = payload_bytes.decode("utf-8-sig", errors="replace")
+        stripped = text_content.lstrip()
+
+        parsed_json: Any = None
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                parsed_json = json.loads(text_content)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"File JSON không hợp lệ: {exc}") from exc
+
+        if isinstance(parsed_json, dict) and parsed_json.get("format") == "sakugapack_v1":
+            imp = self.import_sakugapack_data(parsed_json, overwrite_locked=overwrite_locked)
+            tm_pairs = [
+                (
+                    str(it.get("source_text") or ""),
+                    str(it.get("translated_text") or ""),
+                    str(it.get("category") or "UI"),
+                )
+                for it in (parsed_json.get("strings") or [])
+                if isinstance(it, dict)
+                and it.get("source_text")
+                and it.get("translated_text")
+                and str(it.get("num_map_json") or "{}") == "{}"
+            ]
+            return {
+                "imported_strings": imp["imported_strings"],
+                "skipped_empty": 0,
+                "skipped_unmatched": 0,
+                "skipped_placeholder_mismatch": 0,
+                "source_lang": imp["source_lang"],
+                "target_lang": imp["target_lang"],
+                "tm_pairs": tm_pairs,
+            }
+
+        with self._connect() as conn:
+            db_rows = [
+                dict(r)
+                for r in conn.execute(
+                    """
+                    SELECT str_hash, source_text, num_map_json, category
+                    FROM unique_strings
+                    WHERE source_lang=? AND target_lang=?
+                    ORDER BY CASE category WHEN 'UI' THEN 0 WHEN 'CHOICE' THEN 1 ELSE 2 END, rowid
+                    """,
+                    (source_lang, target_lang),
+                ).fetchall()
+            ]
+        if not db_rows:
+            raise ValueError("Game chưa được quét ngôn ngữ gốc. Hãy bấm Quét lại game trước khi nhập bản dịch ngoài.")
+
+        by_hash: Dict[str, Dict[str, Any]] = {}
+        by_short: Dict[str, List[Dict[str, Any]]] = {}
+        by_source: Dict[str, List[Dict[str, Any]]] = {}
+        for r in db_rows:
+            sh = str(r["str_hash"])
+            by_hash[sh] = r
+            short_key = sh.split(":")[-1][:10]
+            by_short.setdefault(short_key, []).append(r)
+            by_source.setdefault(str(r["source_text"]), []).append(r)
+
+        def _pick_row(key_hint: str, src_hint: str) -> Optional[Dict[str, Any]]:
+            k = (key_hint or "").strip()
+            s = src_hint or ""
+            if k and k in by_hash:
+                return by_hash[k]
+            if k and k in by_short:
+                cands = by_short[k]
+                if len(cands) == 1 or not s:
+                    return cands[0]
+                for c in cands:
+                    if c["source_text"] == s:
+                        return c
+                return cands[0]
+            if k and k.isdigit():
+                idx = int(k) - 1
+                if 0 <= idx < len(db_rows):
+                    cand = db_rows[idx]
+                    if not s or cand["source_text"] == s:
+                        return cand
+            if s and s in by_source:
+                return by_source[s][0]
+            if k and k in by_source:
+                return by_source[k][0]
+            return None
+
+        candidates: List[Tuple[str, str, str]] = []
+        skipped_empty = 0
+
+        if parsed_json is not None:
+            items_list: Optional[List[Any]] = None
+            if isinstance(parsed_json, dict) and isinstance(parsed_json.get("entries"), list):
+                items_list = parsed_json["entries"]
+            elif isinstance(parsed_json, list):
+                items_list = parsed_json
+
+            if items_list is not None:
+                for item in items_list:
+                    if not isinstance(item, dict):
+                        continue
+                    key_hint = str(item.get("id") or item.get("str_hash") or item.get("short_id") or "")
+                    src_hint = str(item.get("source") or item.get("source_text") or "")
+                    tr_val = ""
+                    for fld in ("translation", "translated_text", "translated", "target", "vi"):
+                        v = item.get(fld)
+                        if isinstance(v, str) and v.strip():
+                            tr_val = v
+                            break
+                    if not tr_val.strip():
+                        skipped_empty += 1
+                        continue
+                    candidates.append((key_hint, src_hint, tr_val))
+            elif isinstance(parsed_json, dict):
+                for k, v in parsed_json.items():
+                    if not isinstance(v, str):
+                        continue
+                    if not v.strip():
+                        skipped_empty += 1
+                        continue
+                    candidates.append((str(k), str(k), v))
+            else:
+                raise ValueError("Cấu trúc JSON không được hỗ trợ.")
+        else:
+            for raw_line in text_content.splitlines():
+                line = raw_line.rstrip("\r\n")
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                if "\t" in line:
+                    parts = line.split("\t")
+                    if len(parts) >= 3:
+                        key_hint, src_hint, raw_tr = parts[0].strip(), parts[1], parts[2]
+                    else:
+                        key_hint, src_hint, raw_tr = parts[0].strip(), "", parts[1]
+                elif "|" in line:
+                    left, raw_tr = line.split("|", 1)
+                    key_hint, src_hint = left.strip(), ""
+                else:
+                    continue
+                if not raw_tr.strip():
+                    skipped_empty += 1
+                    continue
+                tr_val = raw_tr.replace("\\t", "\t").replace("\\n", "\n")
+                candidates.append((key_hint, src_hint, tr_val))
+
+        now = int(time.time())
+        updates_by_hash: Dict[str, Tuple[str, int, str]] = {}
+        tm_pairs_map: Dict[str, Tuple[str, str, str]] = {}
+        skipped_unmatched = 0
+        skipped_placeholder_mismatch = 0
+
+        for key_hint, src_hint, tr_val in candidates:
+            row = _pick_row(key_hint, src_hint)
+            if row is None:
+                skipped_unmatched += 1
+                continue
+            tr_clean = _repair_external_tokens(tr_val).strip()
+            if not tr_clean:
+                skipped_empty += 1
+                continue
+            src_txt = str(row["source_text"])
+            exp_nums = Counter(_EXT_NUM_TOK_RE.findall(src_txt))
+            if exp_nums:
+                act_nums = Counter(_EXT_NUM_TOK_RE.findall(tr_clean))
+                if exp_nums != act_nums:
+                    skipped_placeholder_mismatch += 1
+                    continue
+            sh = str(row["str_hash"])
+            updates_by_hash[sh] = (tr_clean, now, sh)
+            if str(row.get("num_map_json") or "{}") == "{}":
+                tm_pairs_map[sh] = (src_txt, tr_clean, str(row.get("category") or "UI"))
+
+        updates = list(updates_by_hash.values())
+        imported_count = 0
+        if updates:
+            lock_clause = "" if overwrite_locked else " AND COALESCE(manual_locked, 0) = 0"
+            with self._connect() as conn:
+                for tr_txt, ts, sh in updates:
+                    cur = conn.execute(
+                        f"""
+                        UPDATE unique_strings
+                        SET translated_text=?, status='DONE', tag_status='EXTERNAL', updated_at=?
+                        WHERE str_hash=?{lock_clause}
+                        """,
+                        (tr_txt, ts, sh),
+                    )
+                    imported_count += int(cur.rowcount or 0)
+                conn.commit()
+
+        return {
+            "imported_strings": imported_count,
+            "skipped_empty": skipped_empty,
+            "skipped_unmatched": skipped_unmatched,
+            "skipped_placeholder_mismatch": skipped_placeholder_mismatch,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "tm_pairs": list(tm_pairs_map.values()),
         }
 
     def checkpoint(self) -> None:

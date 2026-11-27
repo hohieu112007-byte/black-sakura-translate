@@ -36,6 +36,22 @@ TOOL_SPECS = {
         "target_rel": "unreallocres/UnrealLocres.exe",
         "extract_binary": "UnrealLocres.exe",
     },
+    "aesdumpster": {
+        "name": "AESDumpster (Unreal AES Key)",
+        "repo": "GHFear/AESDumpster",
+        "kind": "github_release_zip_or_exe",
+        "asset_keywords": ["win64", ".exe", ".zip"],
+        "target_rel": "AESDumpster.exe",
+        "extract_binary": "AESDumpster.exe",
+    },
+    "retoc": {
+        "name": "retoc (UE5 IoStore .utoc/.ucas)",
+        "repo": "trumank/retoc",
+        "kind": "github_release_zip",
+        "asset_keywords": ["x86_64-pc-windows-msvc", ".zip"],
+        "target_rel": "retoc/retoc.exe",
+        "extract_binary": "retoc.exe",
+    },
     "rpatool": {
         "name": "rpatool (Ren'Py .rpa)",
         "repo": "Shizmob/rpatool",
@@ -81,6 +97,7 @@ class ToolBootstrapper:
         self.tools_dir.mkdir(parents=True, exist_ok=True)
         (self.tools_dir / "repak").mkdir(parents=True, exist_ok=True)
         (self.tools_dir / "unreallocres").mkdir(parents=True, exist_ok=True)
+        (self.tools_dir / "retoc").mkdir(parents=True, exist_ok=True)
         (self.tools_dir / "fonts").mkdir(parents=True, exist_ok=True)
 
     def get_tool_path(self, key: str) -> Path:
@@ -114,9 +131,33 @@ class ToolBootstrapper:
             "all_ready": ready_count == len(TOOL_SPECS),
             "repak_ready": tools["repak"]["installed"],
             "unreallocres_ready": tools["unreallocres"]["installed"],
+            "aesdumpster_ready": tools["aesdumpster"]["installed"],
+            "retoc_ready": tools["retoc"]["installed"],
             "rpatool_ready": tools["rpatool"]["installed"],
             "fonts_ready": tools["font_notosans"]["installed"] and tools["font_bevietnam"]["installed"],
         }
+
+    def _pick_windows_asset(self, key: str, assets: list[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if key in ("repak", "retoc"):
+            for asset in assets:
+                name = (asset.get("name") or "").lower()
+                if "x86_64-pc-windows-msvc" in name and name.endswith(".zip"):
+                    return asset
+        elif key == "aesdumpster":
+            for ext in (".exe", ".zip"):
+                for asset in assets:
+                    name = (asset.get("name") or "").lower()
+                    if name.endswith(ext) and ("aesdumpster" in name or "win64" in name or "win" in name):
+                        return asset
+        elif key == "unreallocres":
+            for ext in (".zip", ".exe"):
+                for asset in assets:
+                    name = (asset.get("name") or "").lower()
+                    if name.endswith(ext) and ("win" in name or "x64" in name or "unreallocres" in name):
+                        return asset
+            if assets:
+                return assets[0]
+        return None
 
     async def _download_bytes(self, client: httpx.AsyncClient, url: str) -> bytes:
         resp = await client.get(url, follow_redirects=True)
@@ -140,6 +181,17 @@ class ToolBootstrapper:
                         with zf.open(member, "r") as src, open(out_file, "wb") as dst:
                             dst.write(src.read())
                         extracted_any = True
+                if not target_path.exists():
+                    bin_stem = Path(binary_name).stem.lower()
+                    for member in zf.infolist():
+                        if member.is_dir():
+                            continue
+                        base = os.path.basename(member.filename)
+                        if base.lower().endswith(".exe") and bin_stem in base.lower():
+                            with zf.open(member, "r") as src, open(target_path, "wb") as dst:
+                                dst.write(src.read())
+                            extracted_any = True
+                            break
                 if not extracted_any or not target_path.exists():
                     raise RuntimeError(f"{binary_name} not found inside {asset_name}")
         else:
@@ -187,26 +239,17 @@ class ToolBootstrapper:
                 rel_resp = await client.get(api_url, follow_redirects=True)
                 rel_resp.raise_for_status()
                 release = rel_resp.json()
-                assets = release.get("assets", [])
+                chosen = self._pick_windows_asset(key, release.get("assets", []))
 
-                chosen = None
-                if key == "repak":
-                    for asset in assets:
-                        name = asset.get("name", "")
-                        if "x86_64-pc-windows-msvc" in name.lower() and name.lower().endswith(".zip"):
-                            chosen = asset
-                            break
-                elif key == "unreallocres":
-                    for ext in (".zip", ".exe"):
-                        for asset in assets:
-                            name = asset.get("name", "").lower()
-                            if name.endswith(ext) and ("win" in name or "x64" in name or "unreallocres" in name):
-                                chosen = asset
-                                break
+                if not chosen:
+                    # Fallback across recent releases (e.g. GHFear/AESDumpster latest tag 1.3 has empty assets, 1.2.5 has AESDumpster-Win64.exe)
+                    list_url = f"https://api.github.com/repos/{spec['repo']}/releases?per_page=10"
+                    list_resp = await client.get(list_url, follow_redirects=True)
+                    list_resp.raise_for_status()
+                    for rel_item in list_resp.json():
+                        chosen = self._pick_windows_asset(key, rel_item.get("assets", []))
                         if chosen:
                             break
-                    if not chosen and assets:
-                        chosen = assets[0]
 
                 if not chosen:
                     raise RuntimeError(f"Không tìm thấy release Windows phù hợp cho {spec['repo']}")
@@ -224,6 +267,24 @@ class ToolBootstrapper:
             if progress_cb:
                 progress_cb(info)
             return info
+
+    async def ensure_tool(
+        self,
+        key: str,
+        force: bool = False,
+        progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        if key not in TOOL_SPECS:
+            raise KeyError(f"Unknown tool key: {key}")
+        if not force and self.is_installed(key):
+            return {
+                "key": key,
+                "status": "cached",
+                "path": str(self.get_tool_path(key)),
+                "message": f"{TOOL_SPECS[key]['name']} đã sẵn sàng",
+            }
+        async with httpx.AsyncClient(headers=HTTP_HEADERS, timeout=60.0) as client:
+            return await self._bootstrap_single(client, key, force=force, progress_cb=progress_cb)
 
     async def ensure_all(
         self,

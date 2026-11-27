@@ -155,6 +155,8 @@
               <div class="hero-badges">
                 <span id="heroLaunchBadge" class="badge badge-mono">READY</span>
                 <span id="heroEngineBadge" class="badge">--</span>
+                <span id="heroIoStoreBadge" class="badge badge-iostore hidden" title="Game sử dụng Unreal Engine 5 IoStore (.utoc/.ucas)">UE5 IoStore</span>
+                <button id="heroAesBadge" type="button" class="badge badge-aes hidden" title="Bấm để xem hoặc đổi AES Key của game Unreal">🔑 AES Đã mở khóa</button>
                 <span id="heroAcBadge" class="badge badge-safe">SAFE</span>
               </div>
               <h1 id="heroTitle" class="hero-title" data-i18n="hero_default_title">Chọn một game từ danh sách bên trái</h1>
@@ -170,6 +172,11 @@
             <p id="studioAcDesc"></p>
           </div>
           <sakuga-checkbox id="chkOfflineOverride" data-i18n="ac_override_lbl">Mở khóa Offline Override (chỉ dùng cho chế độ Offline)</sakuga-checkbox>
+        </div>
+
+        <!-- Amber Pak Signature Guard Banner (only when .sig files detected alongside base Unreal .pak) -->
+        <div id="unrealSigBanner" class="sig-banner hidden">
+          <span id="unrealSigText" data-i18n="unreal_sig_warning">⚠ Phát hiện file kiểm tra chữ ký (.sig): Bản Việt hóa vẫn trích xuất và đóng gói bình thường, nhưng nếu vào game chưa thấy hiện tiếng Việt, bạn cần cài thêm UE Sig Bypass (chỉ dùng cho game Offline).</span>
         </div>
 
         <!-- Steam Action Bar (PLAY + QUICK TRANSLATE + PACK STATUS + ACTIONS) -->
@@ -476,6 +483,23 @@
 
         <!-- SUBTAB 3: SAVED TRANSLATIONS MANAGER & 6 SAFETY SHIELDS -->
         <div id="paneSaved" class="subtab-pane">
+          <div id="externalSourceCard" class="panel-card" style="margin-bottom:14px;">
+            <div class="saved-packs-head">
+              <div>
+                <span class="section-label" data-i18n="ext_src_title">FILE NGUỒN TIẾNG GỐC &amp; DỊCH NGOÀI (CHƯA DỊCH)</span>
+                <div class="mono-mini" data-i18n="ext_src_sub">Tự xuất mỗi khi quét game để bạn mang sang model/AI khác dịch, rồi nhập lại 1-Click vào game để chơi ngay.</div>
+              </div>
+              <div class="live-toolbar-actions">
+                <button id="btnDownloadExternalJson" type="button" class="btn btn-outline btn-sm" data-i18n="btn_dl_ext_json">⬇ Tải file gốc (.json)</button>
+                <button id="btnDownloadExternalTxt" type="button" class="btn btn-outline btn-sm" data-i18n="btn_dl_ext_txt">📄 Tải file gốc (.txt)</button>
+                <button id="btnOpenExternalFolder" type="button" class="btn btn-ghost btn-sm" data-i18n="btn_open_ext_dir">📂 Mở thư mục</button>
+                <button id="btnImportExternalTranslation" type="button" class="btn btn-primary btn-sm" data-i18n="btn_import_ext">📥 Nhập bản dịch ngoài &amp; Cài vào game</button>
+                <input id="inpImportExternalFile" type="file" accept=".json,.txt,.tsv,.sakugapack,.zip" class="hidden" />
+              </div>
+            </div>
+            <div id="externalSourceMeta" class="external-source-meta mono-mini">Chưa có file nguồn — hãy bấm ↻ Quét lại game.</div>
+          </div>
+
           <div class="panel-card">
             <div class="saved-packs-head">
               <div>
@@ -876,6 +900,13 @@
             </div>
             <input id="chkQuietModeHw" type="checkbox" class="hw-checkbox" />
           </div>
+          <div class="settings-row" style="padding:6px 0 2px; border-top:1px dashed var(--border); margin-top:6px;">
+            <div>
+              <strong data-i18n="hw_low_ram_title">🧠 Tối ưu RAM hệ thống (Tắt mmap • Khuyên dùng cho RAM ≤ 16 GB)</strong>
+              <div class="mono-mini" data-i18n="hw_low_ram_desc">Nạp thẳng model lên VRAM thay vì giữ bản sao trên RAM (giảm ~2.5–3.5 GB RAM cho llama server).</div>
+            </div>
+            <input id="chkLowRamModeHw" type="checkbox" class="hw-checkbox" checked />
+          </div>
         </div>
 
         <div class="hw-section-box">
@@ -913,8 +944,8 @@
           <summary data-i18n="hw_adv_summary">🔧 3. Tùy chỉnh kỹ thuật nâng cao (Bỏ qua nếu đang dùng Tự động)</summary>
           <div class="hw-two-col" style="margin-top:10px;">
             <div class="field-group">
-              <label>Workers: <strong id="valParallelWorkers">5</strong></label>
-              <input id="sliderParallelWorkers" type="range" min="1" max="12" step="1" value="5" style="width:100%;" />
+              <label>Workers: <strong id="valParallelWorkers">4</strong></label>
+              <input id="sliderParallelWorkers" type="range" min="1" max="12" step="1" value="4" style="width:100%;" />
             </div>
             <div class="field-group">
               <label data-i18n="hw_ctx_lbl">Độ dài ngữ cảnh (Context Window)</label>
@@ -1061,6 +1092,34 @@
         <div class="modal-actions modal-actions-end" style="gap:8px;">
           <button id="btnCopyErrorReport" type="button" class="btn btn-outline btn-sm" data-i18n="btn_copy_error">📋 Copy lỗi</button>
           <sakuga-button id="btnDismissErrorModal" data-i18n="btn_close">Đóng</sakuga-button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Unreal Engine AES Key Required / Manager -->
+  <div id="modalUnrealAes" class="modal hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-head">
+        <h3 data-i18n="modal_aes_title">🔑 YÊU CẦU AES KEY (UNREAL ENGINE)</h3>
+        <button id="btnCloseUnrealAesModal" type="button" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="margin:0;line-height:1.5;font-size:13px;" data-i18n="modal_aes_desc">
+          File <code>.pak</code>/<code>.utoc</code> của game Unreal này được mã hóa AES (file <code>.exe</code> có thể đang bị bọc DRM nên không thể dò tự động).
+        </p>
+        <div id="unrealShippingExeHint" class="mono-mini" style="opacity:0.8;word-break:break-all;"></div>
+        <div class="field-group">
+          <label for="inpModalUnrealAesKey" data-i18n="lbl_aes_key_input">Khóa AES 256-bit (tự lưu cache dùng lại các lần sau)</label>
+          <input id="inpModalUnrealAesKey" type="text" class="select-full" style="font-family:var(--font-mono);" placeholder="0x... (64 ký tự hex) hoặc chuỗi Base64" autocomplete="off" spellcheck="false" />
+        </div>
+        <div id="unrealAesModalMsg" class="slot-guide-box hidden" style="margin:0;"></div>
+        <div class="modal-actions" style="justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:4px;">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button id="btnModalOpenBinaries" type="button" class="btn btn-ghost btn-sm" data-i18n="btn_open_win64">📂 Mở thư mục Win64-Shipping</button>
+            <button id="btnModalAutoDumpAes" type="button" class="btn btn-outline btn-sm" data-i18n="btn_auto_dump_aes">🔍 Thử dò tự động</button>
+          </div>
+          <sakuga-button id="btnModalSaveUnrealAes" data-i18n="btn_save_scan_aes">🔓 Lưu khóa &amp; Quét ngôn ngữ</sakuga-button>
         </div>
       </div>
     </div>

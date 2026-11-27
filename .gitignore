@@ -26,11 +26,14 @@ settings.json
 cache/
 covers/
 backups/
+exports/
 
 # Auto-bootstrapped third-party binaries & fonts (downloaded on first run)
 tools/repak/
+tools/retoc/
 tools/unreallocres/
 tools/fonts/
+tools/AESDumpster.exe
 tools/rpatool.py
 tools/__pycache__/
 
